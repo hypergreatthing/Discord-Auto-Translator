@@ -1,0 +1,26 @@
+# --- Translation model (~600 MB, auto-downloaded on first launch; exceeds GitHub's 100 MB limit) ---
+backend/models/
+
+# --- Per-user runtime settings (recreated with defaults by backend/config.py) ---
+backend/config.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# --- Build / release output ---
+dist/
+build/
+*.spec
+
+# --- OS / editor noise ---
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+*.log

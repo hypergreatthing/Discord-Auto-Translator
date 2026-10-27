@@ -1,0 +1,10 @@
+# Normalize text files in the repo; check out with native line endings.
+* text=auto
+
+# Windows scripts must always have CRLF line endings (cmd.exe can misparse LF-only .bat files),
+# including inside the release ZIP produced by `git archive`.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+*.vbs  text eol=crlf
+*.iss  text eol=crlf
