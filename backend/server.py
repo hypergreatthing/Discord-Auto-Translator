@@ -45,6 +45,24 @@ class ConfigUpdateRequest(BaseModel):
 def root():
     return {"status": "ok", "service": "Discord Auto Translator Companion"}
 
+PROTOCOL_VERSION = 1
+SERVICE_NAME = "discord-auto-translator"
+
+@app.get("/handshake")
+def handshake():
+    """Identifies this backend so plugins can verify they're talking to the right service."""
+    return {
+        "service": SERVICE_NAME,
+        "protocol": PROTOCOL_VERSION,
+        "version": app.version,
+        "ready": True,
+    }
+
+@app.get("/ping")
+def ping():
+    """Lightweight keep-alive check; does no model or config work."""
+    return {"pong": True}
+
 @app.get("/status")
 def get_status():
     cfg = load_config()

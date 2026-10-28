@@ -14,6 +14,8 @@ module.exports = class DiscordAutoTranslator {
             defaultOutgoingLang: "auto",  // "auto" or specific language code (ja, es, etc.)
             channelOverrides: {},         // Per-channel manual target language overrides { channelId: "ja" }
             channelActive: {},            // Per-channel ON/OFF state { channelId: true }
+            defaultServerEnabled: true,   // Incoming translation for servers with no saved rule
+            serverRules: {},              // Per-server rules { guildId|"@me": { enabled: bool, sourceLang: "auto"|"ja"... } }
             bilingualOutgoing: false,     // Send both translated and (original in parens)
             autoOcrImages: false,         // Gamer-friendly: false = on-demand click
             translateLinks: true,         // Translate link preview embeds
@@ -37,6 +39,7 @@ module.exports = class DiscordAutoTranslator {
 
     start() {
         this.loadSettings();
+        this.startKeepAlive();
         this.injectStyles();
         this.initObserver();
         this.initChannelScanner();
@@ -47,6 +50,7 @@ module.exports = class DiscordAutoTranslator {
     }
 
     stop() {
+        this.stopKeepAlive();
         this.clearStyles();
         if (this.observer) {
             this.observer.disconnect();
@@ -1035,6 +1039,50 @@ module.exports = class DiscordAutoTranslator {
         return match ? match[1] : null;
     }
 
+    /* ==========================================================
+       Per-Server Incoming Translation Rules
+       ========================================================== */
+    getCurrentServerKey() {
+        const match = window.location.pathname.match(/\/channels\/(\d+|@me)/);
+        return match ? match[1] : null;
+    }
+
+    getSourceLangOptions() {
+        return [
+            { code: "auto", name: "Any language" },
+            { code: "ja", name: "Japanese" },
+            { code: "ko", name: "Korean" },
+            { code: "zh", name: "Chinese" },
+            { code: "ru", name: "Russian" },
+            { code: "es", name: "Spanish" },
+            { code: "fr", name: "French" },
+            { code: "de", name: "German" },
+            { code: "pt", name: "Portuguese" },
+            { code: "it", name: "Italian" },
+        ];
+    }
+
+    getServerRule(serverKey) {
+        const defaults = { enabled: this.settings.defaultServerEnabled !== false, sourceLang: "auto" };
+        if (!serverKey) return defaults;
+        const saved = this.settings.serverRules && this.settings.serverRules[serverKey];
+        return Object.assign(defaults, saved || {});
+    }
+
+    setServerRule(serverKey, patch) {
+        if (!serverKey) return;
+        if (!this.settings.serverRules) this.settings.serverRules = {};
+        this.settings.serverRules[serverKey] = Object.assign(this.getServerRule(serverKey), patch);
+        this.saveSettings();
+        this.refreshMessageTranslations();
+    }
+
+    refreshMessageTranslations() {
+        document.querySelectorAll(".dat-translation-container").forEach((el) => el.remove());
+        document.querySelectorAll("[data-dat-processed]").forEach((el) => delete el.dataset.datProcessed);
+        this.processAllMessagesOnScreen();
+    }
+
     extractCleanMessageText(element) {
         let text = "";
         const walk = (node) => {
@@ -1120,6 +1168,10 @@ module.exports = class DiscordAutoTranslator {
 
         const channelId = this.getCurrentChannelId();
 
+        // Per-server rule: skip entirely (no backend call) if disabled for this server
+        const serverRule = this.getServerRule(this.getCurrentServerKey());
+        if (!serverRule.enabled) return;
+
         try {
             const res = await this.fetchTranslation(text, "auto", this.settings.targetLang);
             const norm = (s) => (s || "").replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
@@ -1127,6 +1179,12 @@ module.exports = class DiscordAutoTranslator {
                 !res.source_lang || res.source_lang === "und" ||
                 res.source_lang === this.settings.targetLang ||
                 norm(res.translated_text) === norm(text)) {
+                return;
+            }
+
+            // Per-server source filter: only translate messages detected as the chosen language
+            if (serverRule.sourceLang !== "auto" &&
+                res.source_lang.toLowerCase().split("-")[0] !== serverRule.sourceLang.toLowerCase()) {
                 return;
             }
 
@@ -1448,6 +1506,55 @@ module.exports = class DiscordAutoTranslator {
         const popup = document.createElement("div");
         popup.className = "dat-lang-popup";
 
+        // ---- Per-server incoming translation controls ----
+        const guildId = this.getCurrentServerKey();
+        if (guildId) {
+            const rule = this.getServerRule(guildId);
+
+            const srvTitle = document.createElement("div");
+            srvTitle.className = "dat-popup-title";
+            srvTitle.innerText = guildId === "@me" ? "Direct Messages (Incoming)" : "This Server (Incoming)";
+            popup.appendChild(srvTitle);
+
+            const toggleItem = document.createElement("div");
+            toggleItem.className = `dat-lang-item ${rule.enabled ? "selected" : ""}`;
+            toggleItem.innerHTML = `<span>Auto-translate here</span>${rule.enabled ? "✓" : "OFF"}`;
+            toggleItem.onclick = (e) => {
+                e.stopPropagation();
+                const now = !this.getServerRule(guildId).enabled;
+                this.setServerRule(guildId, { enabled: now });
+                toggleItem.className = `dat-lang-item ${now ? "selected" : ""}`;
+                toggleItem.innerHTML = `<span>Auto-translate here</span>${now ? "✓" : "OFF"}`;
+                this.showToast(`Incoming translation for this server: ${now ? "ENABLED" : "DISABLED"}`, { type: "info" });
+            };
+            popup.appendChild(toggleItem);
+
+            const fromRow = document.createElement("div");
+            fromRow.className = "dat-lang-item";
+            fromRow.style.cursor = "default";
+            const fromLabel = document.createElement("span");
+            fromLabel.innerText = "Only from:";
+            const fromSelect = document.createElement("select");
+            fromSelect.style.cssText = "background:#2f3136;color:white;border:1px solid #202225;border-radius:4px;padding:2px;max-width:60%;";
+            this.getSourceLangOptions().forEach((l) => {
+                const opt = document.createElement("option");
+                opt.value = l.code;
+                opt.textContent = l.name;
+                if (rule.sourceLang === l.code) opt.selected = true;
+                fromSelect.appendChild(opt);
+            });
+            fromSelect.onclick = (e) => e.stopPropagation();
+            fromSelect.onchange = (e) => {
+                e.stopPropagation();
+                this.setServerRule(guildId, { sourceLang: fromSelect.value });
+                const picked = fromSelect.options[fromSelect.selectedIndex].textContent;
+                this.showToast(`Translating from: ${picked}`, { type: "info" });
+            };
+            fromRow.appendChild(fromLabel);
+            fromRow.appendChild(fromSelect);
+            popup.appendChild(fromRow);
+        }
+
         const title = document.createElement("div");
         title.className = "dat-popup-title";
         title.innerText = "Translate Outgoing To:";
@@ -1513,22 +1620,100 @@ module.exports = class DiscordAutoTranslator {
     /* ==========================================================
        API Networking with Local Companion Daemon
        ========================================================== */
+    /* ----------------------------------------------------------
+       Backend handshake + keep-alive
+       ---------------------------------------------------------- */
+    async fetchWithTimeout(path, options = {}, timeoutMs = 2000) {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+        try {
+            return await fetch(`${this.settings.serverUrl}${path}`, Object.assign({}, options, { signal: ctrl.signal }));
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
+    setBackendOnline(online) {
+        if (this.backendOnline === online) return;
+        this.backendOnline = online;
+        console.log(`[DiscordAutoTranslator] Backend ${online ? "connected" : "unreachable - translation bypassed"}.`);
+        if (online) {
+            if (BdApi && BdApi.UI && BdApi.UI.showToast) BdApi.UI.showToast("Auto Translator backend connected", { type: "success" });
+        } else {
+            this.translationCache.clear();
+        }
+    }
+
+    async performHandshake() {
+        try {
+            const resp = await this.fetchWithTimeout("/handshake", {}, 2000);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const data = await resp.json();
+            if (data.service !== "discord-auto-translator" || !data.ready) throw new Error("Unexpected service");
+            this.setBackendOnline(true);
+            return true;
+        } catch (e) {
+            this.setBackendOnline(false);
+            return false;
+        }
+    }
+
+    async pingBackend() {
+        if (!this.backendOnline) return this.performHandshake();
+        try {
+            const resp = await this.fetchWithTimeout("/ping", {}, 2000);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            return true;
+        } catch (e) {
+            this.setBackendOnline(false);
+            return false;
+        }
+    }
+
+    startKeepAlive() {
+        this.stopKeepAlive();
+        this.backendOnline = false;
+        this.performHandshake();
+        // Ping every 10s while online; retry the handshake every 5s while offline.
+        const tick = async () => {
+            await this.pingBackend();
+            this.keepAliveTimer = setTimeout(tick, this.backendOnline ? 10000 : 5000);
+        };
+        this.keepAliveTimer = setTimeout(tick, 5000);
+    }
+
+    stopKeepAlive() {
+        if (this.keepAliveTimer) {
+            clearTimeout(this.keepAliveTimer);
+            this.keepAliveTimer = null;
+        }
+    }
+
     async fetchTranslation(text, srcLang = "auto", tgtLang = "en") {
         const cacheKey = `${srcLang}:${tgtLang}:${text}`;
         if (this.translationCache.has(cacheKey)) {
             return this.translationCache.get(cacheKey);
         }
 
-        const resp = await fetch(`${this.settings.serverUrl}/translate`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                text: text,
-                source_lang: srcLang,
-                target_lang: tgtLang,
-                mode: this.settings.accuracyMode
-            })
-        });
+        // Bypass translation entirely when the backend isn't running.
+        if (!this.backendOnline) return null;
+
+        let resp;
+        try {
+            resp = await this.fetchWithTimeout("/translate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    text: text,
+                    source_lang: srcLang,
+                    target_lang: tgtLang,
+                    mode: this.settings.accuracyMode
+                })
+            }, 30000);
+        } catch (e) {
+            this.setBackendOnline(false);
+            return null;
+        }
 
         if (!resp.ok) throw new Error(`HTTP error ${resp.status}`);
         const data = await resp.json();
@@ -1537,14 +1722,22 @@ module.exports = class DiscordAutoTranslator {
     }
 
     async fetchImageOcr(imageUrl, tgtLang = "en") {
-        const resp = await fetch(`${this.settings.serverUrl}/ocr_translate`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                image_url: imageUrl,
-                target_lang: tgtLang
-            })
-        });
+        if (!this.backendOnline) return null;
+
+        let resp;
+        try {
+            resp = await this.fetchWithTimeout("/ocr_translate", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    image_url: imageUrl,
+                    target_lang: tgtLang
+                })
+            }, 60000);
+        } catch (e) {
+            this.setBackendOnline(false);
+            return null;
+        }
 
         if (!resp.ok) throw new Error(`HTTP error ${resp.status}`);
         return await resp.json();
