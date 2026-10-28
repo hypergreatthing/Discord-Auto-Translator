@@ -14,7 +14,7 @@ module.exports = class DiscordAutoTranslator {
             defaultOutgoingLang: "auto",  // "auto" or specific language code (ja, es, etc.)
             channelOverrides: {},         // Per-channel manual target language overrides { channelId: "ja" }
             channelActive: {},            // Per-channel ON/OFF state { channelId: true }
-            defaultServerEnabled: true,   // Incoming translation for servers with no saved rule
+            defaultServerEnabled: false,  // Incoming translation for servers with no saved rule (OFF by default)
             serverRules: {},              // Per-server rules { guildId|"@me": { enabled: bool, sourceLang: "auto"|"ja"... } }
             bilingualOutgoing: false,     // Send both translated and (original in parens)
             autoOcrImages: false,         // Gamer-friendly: false = on-demand click
@@ -104,6 +104,8 @@ module.exports = class DiscordAutoTranslator {
                 }
             }
             if (saved) Object.assign(this.settings, saved);
+            // Default all unconfigured servers to OFF
+            this.settings.defaultServerEnabled = false;
         } catch (e) {
             console.error("[DiscordAutoTranslator] Failed to load settings:", e);
         }
@@ -523,6 +525,7 @@ module.exports = class DiscordAutoTranslator {
        ========================================================== */
     scanMemberGroups() {
         if (!this.settings.translateMemberGroups) return;
+        if (!this.getServerRule(this.getCurrentServerKey()).enabled) return;
         const groups = document.querySelectorAll('[class*="membersGroup_"], [class*="membersGroup"]');
         groups.forEach(g => {
             const hasDisplay = this.settings.channelDisplayMode === "subtitle"
@@ -537,6 +540,7 @@ module.exports = class DiscordAutoTranslator {
     async processMemberGroupElement(groupEl) {
         groupEl.dataset.datRoleProcessed = "true";
         if (!this.settings.translateMemberGroups) return;
+        if (!this.getServerRule(this.getCurrentServerKey()).enabled) return;
 
         const clone = groupEl.cloneNode(true);
         clone.querySelectorAll(".dat-channel-badge, .dat-channel-subtitle").forEach(b => b.remove());
@@ -651,6 +655,7 @@ module.exports = class DiscordAutoTranslator {
 
     scanAllChannels() {
         if (!this.settings.translateChannels) return;
+        if (!this.getServerRule(this.getCurrentServerKey()).enabled) return;
 
         // 1. Text, Voice, Announcement, Forum channels
         const channels = document.querySelectorAll('[data-list-item-id^="channels___"]');
@@ -711,6 +716,7 @@ module.exports = class DiscordAutoTranslator {
 
     async processChannelElement(channelEl) {
         channelEl.dataset.datChannelProcessed = "true";
+        if (!this.getServerRule(this.getCurrentServerKey()).enabled) return;
 
         const itemId = channelEl.getAttribute("data-list-item-id") || "";
         const channelId = itemId.includes("___") ? itemId.split("___")[1] : null;
@@ -763,6 +769,7 @@ module.exports = class DiscordAutoTranslator {
 
     async processCategoryElement(catEl) {
         catEl.dataset.datChannelProcessed = "true";
+        if (!this.getServerRule(this.getCurrentServerKey()).enabled) return;
 
         const nameEl = catEl.querySelector('h2, [class*="name_"], [class*="categoryName_"]') || catEl;
         if (!nameEl) return;
@@ -867,6 +874,7 @@ module.exports = class DiscordAutoTranslator {
 
     async processHeaderTitle() {
         if (!this.settings.translateHeaderTitle) return;
+        if (!this.getServerRule(this.getCurrentServerKey()).enabled) return;
 
         const header = document.querySelector('section[class*="title_"], [class*="titleWrapper_"]');
         if (!header) return;
@@ -959,6 +967,8 @@ module.exports = class DiscordAutoTranslator {
     }
 
     processAllMessagesOnScreen() {
+        if (!this.getServerRule(this.getCurrentServerKey()).enabled) return;
+
         const messages = document.querySelectorAll('[id^="message-content-"]:not([data-dat-processed])');
         messages.forEach((el) => {
             this.processMessageContent(el);
@@ -972,6 +982,7 @@ module.exports = class DiscordAutoTranslator {
 
     processMessageElement(element) {
         if (!element) return;
+        if (!this.getServerRule(this.getCurrentServerKey()).enabled) return;
 
         // Check if the node itself is message-content
         if (element.id && element.id.startsWith("message-content-")) {
@@ -1063,7 +1074,7 @@ module.exports = class DiscordAutoTranslator {
     }
 
     getServerRule(serverKey) {
-        const defaults = { enabled: this.settings.defaultServerEnabled !== false, sourceLang: "auto" };
+        const defaults = { enabled: !!this.settings.defaultServerEnabled, sourceLang: "auto" };
         if (!serverKey) return defaults;
         const saved = this.settings.serverRules && this.settings.serverRules[serverKey];
         return Object.assign(defaults, saved || {});
@@ -1074,12 +1085,22 @@ module.exports = class DiscordAutoTranslator {
         if (!this.settings.serverRules) this.settings.serverRules = {};
         this.settings.serverRules[serverKey] = Object.assign(this.getServerRule(serverKey), patch);
         this.saveSettings();
-        if ("enabled" in patch || "sourceLang" in patch) this.refreshMessageTranslations();
+        if ("enabled" in patch || "sourceLang" in patch) {
+            this.cleanupChannelBadges();
+            this.refreshMessageTranslations();
+            if (this.getServerRule(serverKey).enabled) {
+                this.scanAllChannels();
+                this.scanMemberGroups();
+                this.processHeaderTitle();
+            }
+        }
     }
 
     refreshMessageTranslations() {
         document.querySelectorAll(".dat-translation-container").forEach((el) => el.remove());
         document.querySelectorAll("[data-dat-processed]").forEach((el) => delete el.dataset.datProcessed);
+        document.querySelectorAll(".dat-ocr-btn, .dat-ocr-result").forEach((el) => el.remove());
+        document.querySelectorAll("[data-dat-ocr-processed]").forEach((el) => delete el.dataset.datOcrProcessed);
         this.processAllMessagesOnScreen();
     }
 
