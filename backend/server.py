@@ -7,6 +7,7 @@ from .config import load_config, save_config
 from .engine import engine_instance
 from .ocr import ImageOCREngine
 from .priority import set_process_priority, apply_thread_limits
+from .voice_engine import voice_engine_instance
 
 app = FastAPI(title="Discord Auto Translator Core", version="1.0.0")
 
@@ -149,4 +150,77 @@ def pull_latest_from_github():
         }
     except Exception as e:
         return {"updated": False, "error": str(e)}
+
+
+# ==========================================================
+# Real-Time Per-User Voice Translation Endpoints
+# ==========================================================
+class VoiceTrackUserRequest(BaseModel):
+    user_id: str
+    enabled: bool = True
+    username: Optional[str] = "User"
+    source_lang: Optional[str] = "ru"
+    target_lang: Optional[str] = "en"
+    tts: Optional[bool] = True
+
+class VoiceSpeakingEventRequest(BaseModel):
+    user_id: str
+    speaking: bool
+    username: Optional[str] = None
+
+class VoiceAudioChunkRequest(BaseModel):
+    user_id: str
+    audio_b64: str
+    sample_rate: Optional[int] = 16000
+    source_lang: Optional[str] = None
+    target_lang: Optional[str] = None
+    username: Optional[str] = None
+
+@app.get("/voice/status")
+def voice_status():
+    return voice_engine_instance.get_status()
+
+@app.post("/voice/track_user")
+def voice_track_user(req: VoiceTrackUserRequest):
+    cfg = load_config()
+    tgt = req.target_lang or cfg.get("default_target_lang", "en")
+    return voice_engine_instance.set_tracked_user(
+        user_id=req.user_id,
+        enabled=req.enabled,
+        username=req.username or "User",
+        source_lang=req.source_lang or "auto",
+        target_lang=tgt,
+        tts=bool(req.tts),
+    )
+
+@app.post("/voice/clear_users")
+def voice_clear_users():
+    return voice_engine_instance.clear_tracked_users()
+
+@app.post("/voice/speaking")
+def voice_speaking_event(req: VoiceSpeakingEventRequest):
+    res = voice_engine_instance.notify_user_speaking(
+        user_id=req.user_id,
+        speaking=req.speaking,
+        username=req.username,
+    )
+    return res or {"ok": True}
+
+@app.post("/voice/translate_chunk")
+def voice_translate_chunk(req: VoiceAudioChunkRequest):
+    if not req.audio_b64:
+        raise HTTPException(status_code=400, detail="Missing audio_b64")
+    return voice_engine_instance.translate_audio_chunk(
+        user_id=req.user_id,
+        audio_b64=req.audio_b64,
+        sample_rate=req.sample_rate or 16000,
+        source_lang=req.source_lang,
+        target_lang=req.target_lang,
+        username=req.username,
+    )
+
+@app.get("/voice/captions")
+def voice_get_captions(since_seq: int = 0):
+    return {"captions": voice_engine_instance.get_captions_since(since_seq)}
+
 

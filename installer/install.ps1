@@ -16,6 +16,7 @@ Write-Host "[1/5] Checking BetterDiscord installation..." -ForegroundColor Yello
 $bdPath = Join-Path $env:APPDATA "BetterDiscord"
 $pluginDestDir = Join-Path $bdPath "plugins"
 $pluginSrc = Join-Path $projectRoot "plugins\betterdiscord\DiscordAutoTranslator.plugin.js"
+$voicePluginSrc = Join-Path $projectRoot "plugins\betterdiscord\DiscordVoiceTranslator.plugin.js"
 
 if (-not (Test-Path $bdPath)) {
     Write-Host "  [!] BetterDiscord directory was not found on your system." -ForegroundColor Red
@@ -33,6 +34,10 @@ if (-not (Test-Path $bdPath)) {
         Write-Host "  [OK] DiscordAutoTranslator.plugin.js installed to BetterDiscord!" -ForegroundColor Green
     } else {
         Write-Host "  [!] Plugin source file not found at $pluginSrc" -ForegroundColor Red
+    }
+    if (Test-Path $voicePluginSrc) {
+        Copy-Item -Path $voicePluginSrc -Destination (Join-Path $pluginDestDir "DiscordVoiceTranslator.plugin.js") -Force
+        Write-Host "  [OK] DiscordVoiceTranslator.plugin.js installed to BetterDiscord!" -ForegroundColor Green
     }
 }
 
