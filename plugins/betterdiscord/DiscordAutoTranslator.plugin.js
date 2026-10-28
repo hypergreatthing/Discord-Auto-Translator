@@ -1074,7 +1074,7 @@ module.exports = class DiscordAutoTranslator {
         if (!this.settings.serverRules) this.settings.serverRules = {};
         this.settings.serverRules[serverKey] = Object.assign(this.getServerRule(serverKey), patch);
         this.saveSettings();
-        this.refreshMessageTranslations();
+        if ("enabled" in patch || "sourceLang" in patch) this.refreshMessageTranslations();
     }
 
     refreshMessageTranslations() {
@@ -1336,48 +1336,67 @@ module.exports = class DiscordAutoTranslator {
     /* ==========================================================
        Outgoing Chat Input Hook (Auto-Translate Replies)
        ========================================================== */
+    getServerKeyForChannel(channelId) {
+        // Resolve the guild from the channel itself (sendMessage only gives us a channel id)
+        try {
+            if (channelId && typeof BdApi !== "undefined" && BdApi.Webpack) {
+                const ChannelStore = BdApi.Webpack.getStore ? BdApi.Webpack.getStore("ChannelStore") : null;
+                const ch = ChannelStore && ChannelStore.getChannel ? ChannelStore.getChannel(channelId) : null;
+                if (ch) return ch.guild_id || "@me";
+            }
+        } catch (_) {}
+        return this.getCurrentServerKey();
+    }
+
     isOutgoingEnabledFor(channelId) {
-        if (!channelId) return !!this.settings.translateOutgoing;
-        if (this.settings.channelActive && channelId in this.settings.channelActive) {
+        // 1. Legacy explicit per-channel state (from earlier versions)
+        if (channelId && this.settings.channelActive && channelId in this.settings.channelActive) {
             return !!this.settings.channelActive[channelId];
         }
+        // 2. Per-server rule
+        const rule = this.getServerRule(this.getServerKeyForChannel(channelId));
+        if (typeof rule.outgoing === "boolean") return rule.outgoing;
+        // 3. Global default
         return !!this.settings.translateOutgoing;
     }
 
     setOutgoingEnabledFor(channelId, active) {
-        if (!this.settings.channelActive) this.settings.channelActive = {};
-        if (channelId) {
-            this.settings.channelActive[channelId] = active;
+        // Toggling now applies to the whole server; drop any legacy per-channel override so it takes effect
+        if (channelId && this.settings.channelActive) delete this.settings.channelActive[channelId];
+        const key = this.getServerKeyForChannel(channelId);
+        if (key) {
+            this.setServerRule(key, { outgoing: active });
+        } else {
+            this.settings.translateOutgoing = active;
+            this.saveSettings();
         }
-        this.settings.translateOutgoing = active;
-        this.saveSettings();
     }
 
     getOutgoingTargetLang(channelId) {
-        // 1. User manual override for this channel
+        // 1. Legacy per-channel override (from earlier versions)
         if (channelId && this.settings.channelOverrides && this.settings.channelOverrides[channelId]) {
             return this.settings.channelOverrides[channelId];
         }
-        // 2. Automatically detected foreign language in this channel
+        // 2. Per-server target language
+        const rule = this.getServerRule(this.getServerKeyForChannel(channelId));
+        if (rule.outgoingLang && rule.outgoingLang !== "auto") {
+            return rule.outgoingLang;
+        }
+        // 3. Automatically detected foreign language in this channel
         if (channelId && this.channelLanguages.has(channelId)) {
             return this.channelLanguages.get(channelId);
         }
-        // 3. Fallback to default outgoing setting or Japanese
+        // 4. Fallback to default outgoing setting or Japanese
         return (this.settings.defaultOutgoingLang && this.settings.defaultOutgoingLang !== "auto")
             ? this.settings.defaultOutgoingLang
             : "ja";
     }
 
-    setChannelOutgoingTargetLang(channelId, langCode) {
-        if (!this.settings.channelOverrides) this.settings.channelOverrides = {};
-        if (channelId) {
-            if (langCode === "auto") {
-                delete this.settings.channelOverrides[channelId];
-            } else {
-                this.settings.channelOverrides[channelId] = langCode;
-            }
-            this.saveSettings();
-        }
+    setServerOutgoingLang(channelId, langCode) {
+        // Picking a language applies to the whole server; drop any legacy per-channel override
+        if (channelId && this.settings.channelOverrides) delete this.settings.channelOverrides[channelId];
+        const key = this.getServerKeyForChannel(channelId);
+        if (key) this.setServerRule(key, { outgoingLang: langCode });
     }
 
     /* ==========================================================
@@ -1555,9 +1574,34 @@ module.exports = class DiscordAutoTranslator {
             popup.appendChild(fromRow);
         }
 
+        // ---- Per-server outgoing translation toggle ----
+        if (guildId) {
+            const outTitle = document.createElement("div");
+            outTitle.className = "dat-popup-title";
+            outTitle.innerText = guildId === "@me" ? "Direct Messages (Outgoing)" : "This Server (Outgoing)";
+            popup.appendChild(outTitle);
+
+            const outToggle = document.createElement("div");
+            const renderOutToggle = () => {
+                const on = this.isOutgoingEnabledFor(channelId);
+                outToggle.className = `dat-lang-item ${on ? "selected" : ""}`;
+                outToggle.innerHTML = `<span>Translate my messages here</span>${on ? "✓" : "OFF"}`;
+            };
+            renderOutToggle();
+            outToggle.onclick = (e) => {
+                e.stopPropagation();
+                const now = !this.isOutgoingEnabledFor(channelId);
+                this.setOutgoingEnabledFor(channelId, now);
+                renderOutToggle();
+                this.updateChatBarButton();
+                this.showToast(`Outgoing translation for this server: ${now ? "ENABLED" : "DISABLED"}`, { type: "info" });
+            };
+            popup.appendChild(outToggle);
+        }
+
         const title = document.createElement("div");
         title.className = "dat-popup-title";
-        title.innerText = "Translate Outgoing To:";
+        title.innerText = "Translate Outgoing To (this server):";
         popup.appendChild(title);
 
         const languages = [
@@ -1573,22 +1617,25 @@ module.exports = class DiscordAutoTranslator {
             { code: "it", name: "🇮🇹 Italian (it)" },
         ];
 
+        const serverKeyForPicker = this.getServerKeyForChannel(channelId);
+        const savedServerLang = (this.getServerRule(serverKeyForPicker).outgoingLang) || "auto";
+
         languages.forEach((l) => {
             const item = document.createElement("div");
-            const isSelected = (l.code === "auto" && !this.settings.channelOverrides?.[channelId]) || currentLang === l.code;
+            const isSelected = savedServerLang === l.code;
             item.className = `dat-lang-item ${isSelected ? "selected" : ""}`;
             item.innerHTML = `<span>${l.name}</span>${isSelected ? "✓" : ""}`;
 
             item.onclick = (e) => {
                 e.stopPropagation();
-                this.setChannelOutgoingTargetLang(channelId, l.code);
+                this.setServerOutgoingLang(channelId, l.code);
                 popup.remove();
 
                 const nowLang = this.getOutgoingTargetLang(channelId);
                 const isEnabled = this.isOutgoingEnabledFor(channelId);
                 btn.innerHTML = `🌐 ${isEnabled ? nowLang.toUpperCase() : ""}`;
                 btn.title = `Auto-Translate Outgoing: ${isEnabled ? "ON (" + nowLang.toUpperCase() + ")" : "OFF"}\nLeft-click to toggle, Right-click to choose language (Alt+T)`;
-                this.showToast(`Channel target language: ${l.name}`, { type: "info" });
+                this.showToast(`Server target language: ${l.name}`, { type: "info" });
             };
 
             popup.appendChild(item);
