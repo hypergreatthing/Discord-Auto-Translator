@@ -2,11 +2,15 @@
  * @name DiscordAutoTranslator
  * @author Antigravity
  * @description Offline, gamer-friendly real-time auto-translator with complete sentence accuracy, inline translation under foreign messages, embed & image OCR translation, and auto-translating outgoing responses.
- * @version 0.1.0
+ * @version 0.2.0
+ * @source https://github.com/hypergreatthing/Discord-Auto-Translator
+ * @updateUrl https://raw.githubusercontent.com/hypergreatthing/Discord-Auto-Translator/main/plugins/betterdiscord/DiscordAutoTranslator.plugin.js
  */
 
 module.exports = class DiscordAutoTranslator {
     constructor() {
+        this.version = "0.2.0";
+        this.updateUrl = "https://raw.githubusercontent.com/hypergreatthing/Discord-Auto-Translator/main/plugins/betterdiscord/DiscordAutoTranslator.plugin.js";
         this.defaultSettings = {
             targetLang: "en",
             accuracyMode: "deep_thought", // "deep_thought" (complete sentence context) or "fast"
@@ -24,6 +28,7 @@ module.exports = class DiscordAutoTranslator {
             translateMemberGroups: true,  // Auto-translate member list role categories in user list
             translateHeaderTitle: true,   // Auto-translate active channel header title
             channelDisplayMode: "suffix", // "suffix" [Translated], "subtitle", "replace", "tooltip"
+            autoUpdate: true,             // Automatically check GitHub and install new plugin versions
             serverUrl: "http://127.0.0.1:49152"
         };
         this.settings = Object.assign({}, this.defaultSettings);
@@ -33,6 +38,7 @@ module.exports = class DiscordAutoTranslator {
         this.channelLanguages = new Map(); // Dynamically detected foreign languages per channel
         this.observer = null;
         this.channelScanInterval = null;
+        this.updateCheckInterval = null;
         this.lastChannelId = null;
         this.navHandler = null;
     }
@@ -40,17 +46,19 @@ module.exports = class DiscordAutoTranslator {
     start() {
         this.loadSettings();
         this.startKeepAlive();
+        this.startAutoUpdater();
         this.injectStyles();
         this.initObserver();
         this.initChannelScanner();
         this.hookChatBar();
         this.hookNavigation();
         this.showWelcomeToast();
-        console.log("[DiscordAutoTranslator] Started successfully.");
+        console.log(`[DiscordAutoTranslator] v${this.version} started successfully.`);
     }
 
     stop() {
         this.stopKeepAlive();
+        this.stopAutoUpdater();
         this.clearStyles();
         if (this.observer) {
             this.observer.disconnect();
@@ -1757,6 +1765,113 @@ module.exports = class DiscordAutoTranslator {
         }
     }
 
+    /* ----------------------------------------------------------
+       GitHub Auto-Updater
+       ---------------------------------------------------------- */
+    startAutoUpdater() {
+        this.stopAutoUpdater();
+        if (this.settings.autoUpdate !== false) {
+            setTimeout(() => this.checkForUpdates(false), 3000);
+        }
+        // Check every 6 hours while running
+        this.updateCheckInterval = setInterval(() => {
+            if (this.settings.autoUpdate !== false) {
+                this.checkForUpdates(false);
+            }
+        }, 6 * 60 * 60 * 1000);
+    }
+
+    stopAutoUpdater() {
+        if (this.updateCheckInterval) {
+            clearInterval(this.updateCheckInterval);
+            this.updateCheckInterval = null;
+        }
+    }
+
+    compareSemver(vA, vB) {
+        const clean = (v) => String(v || "0.0.0").replace(/^v/i, "").trim().split(".").map((n) => parseInt(n, 10) || 0);
+        const a = clean(vA);
+        const b = clean(vB);
+        const len = Math.max(a.length, b.length, 3);
+        for (let i = 0; i < len; i++) {
+            const diff = (a[i] || 0) - (b[i] || 0);
+            if (diff > 0) return 1;
+            if (diff < 0) return -1;
+        }
+        return 0;
+    }
+
+    async fetchRemotePluginSource() {
+        const url = `${this.updateUrl}?t=${Date.now()}`;
+        if (typeof BdApi !== "undefined" && BdApi.Net && typeof BdApi.Net.fetch === "function") {
+            const resp = await BdApi.Net.fetch(url, { cache: "no-store" });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            return await resp.text();
+        }
+        const resp = await fetch(url, { cache: "no-store" });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return await resp.text();
+    }
+
+    async checkForUpdates(manual = false) {
+        try {
+            const remoteCode = await this.fetchRemotePluginSource();
+            if (!remoteCode || !remoteCode.includes("@name DiscordAutoTranslator")) {
+                if (manual) this.showToast("Could not verify remote plugin file on GitHub.", { type: "error" });
+                return false;
+            }
+            const verMatch = remoteCode.match(/@version\s+([0-9]+\.[0-9]+\.[0-9A-Za-z.\-_]+)/);
+            const remoteVersion = verMatch ? verMatch[1].trim() : null;
+            if (!remoteVersion) {
+                if (manual) this.showToast("Could not read version from GitHub.", { type: "error" });
+                return false;
+            }
+
+            if (this.compareSemver(remoteVersion, this.version) > 0) {
+                console.log(`[DiscordAutoTranslator] New version found on GitHub: v${remoteVersion} (current: v${this.version}). Updating...`);
+                const updated = await this.installPluginUpdate(remoteCode, remoteVersion);
+                return updated;
+            } else {
+                if (manual) {
+                    this.showToast(`Discord Auto-Translator is up to date (v${this.version}).`, { type: "success" });
+                }
+                return false;
+            }
+        } catch (err) {
+            console.warn("[DiscordAutoTranslator] Update check failed:", err);
+            if (manual) {
+                this.showToast(`Update check failed: ${err.message || err}`, { type: "error" });
+            }
+            return false;
+        }
+    }
+
+    async installPluginUpdate(remoteCode, remoteVersion) {
+        try {
+            const fs = require("fs");
+            const path = require("path");
+            const pluginsFolder = (typeof BdApi !== "undefined" && BdApi.Plugins && BdApi.Plugins.folder)
+                ? BdApi.Plugins.folder
+                : __dirname;
+            const targetFile = path.join(pluginsFolder, "DiscordAutoTranslator.plugin.js");
+            fs.writeFileSync(targetFile, remoteCode, "utf8");
+
+            // Also ask the local backend companion to `git pull` if it's currently online
+            if (this.backendOnline) {
+                try {
+                    await this.fetchWithTimeout("/update", { method: "POST" }, 10000);
+                } catch (_) {}
+            }
+
+            this.showToast(`Discord Auto-Translator auto-updated to v${remoteVersion}!`, { type: "success" });
+            return true;
+        } catch (err) {
+            console.error("[DiscordAutoTranslator] Failed to write plugin update:", err);
+            this.showToast(`Auto-update to v${remoteVersion} failed: ${err.message || err}`, { type: "error" });
+            return false;
+        }
+    }
+
     async fetchTranslation(text, srcLang = "auto", tgtLang = "en") {
         const cacheKey = `${srcLang}:${tgtLang}:${text}`;
         if (this.translationCache.has(cacheKey)) {
@@ -1825,7 +1940,7 @@ module.exports = class DiscordAutoTranslator {
         panel.style.color = "#dcddde";
 
         panel.innerHTML = `
-            <h2 style="color: white; margin-bottom: 12px;">Discord Auto-Translator Settings</h2>
+            <h2 style="color: white; margin-bottom: 12px;">Discord Auto-Translator Settings <span style="font-size: 0.7em; color: #8e9297; font-weight: normal;">v${this.version}</span></h2>
 
             <div style="margin-bottom: 16px;">
                 <label style="display: block; font-weight: 600; margin-bottom: 6px;">Your Primary / Target Language:</label>
@@ -1929,6 +2044,17 @@ module.exports = class DiscordAutoTranslator {
                     </select>
                 </div>
             </div>
+
+            <div style="margin-top: 16px; padding-top: 14px; border-top: 1px solid rgba(255, 255, 255, 0.08);">
+                <h3 style="color: white; margin-bottom: 10px; font-size: 1.05em;">Updates (GitHub)</h3>
+                <div style="margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                        <input type="checkbox" id="dat-auto-update" ${this.settings.autoUpdate !== false ? "checked" : ""}>
+                        <span>Automatically check GitHub & install updates on startup</span>
+                    </label>
+                    <button id="dat-check-update-btn" style="background: #5865F2; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: 600;">Check for Updates Now</button>
+                </div>
+            </div>
         `;
 
         // Bind change listeners
@@ -1989,6 +2115,20 @@ module.exports = class DiscordAutoTranslator {
             this.cleanupChannelBadges();
             if (this.settings.translateChannels) this.scanAllChannels();
         };
+        panel.querySelector("#dat-auto-update").onchange = (e) => {
+            this.settings.autoUpdate = e.target.checked;
+            this.saveSettings();
+        };
+        const checkBtn = panel.querySelector("#dat-check-update-btn");
+        if (checkBtn) {
+            checkBtn.onclick = async () => {
+                checkBtn.disabled = true;
+                checkBtn.innerText = "Checking...";
+                await this.checkForUpdates(true);
+                checkBtn.disabled = false;
+                checkBtn.innerText = "Check for Updates Now";
+            };
+        }
 
         return panel;
     }

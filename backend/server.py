@@ -125,3 +125,28 @@ def ocr_translate(req: OCRTranslateRequest):
         target_lang=target_lang
     )
     return result
+
+@app.post("/update")
+def pull_latest_from_github():
+    """Pulls the latest code from GitHub for the local repo if it's a git checkout."""
+    import os
+    import subprocess
+    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if not os.path.exists(os.path.join(repo_dir, ".git")):
+        return {"updated": False, "reason": "Not a git repository"}
+    try:
+        proc = subprocess.run(
+            ["git", "pull", "--ff-only", "origin", "main"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=20
+        )
+        return {
+            "updated": proc.returncode == 0,
+            "stdout": (proc.stdout or "").strip(),
+            "stderr": (proc.stderr or "").strip(),
+        }
+    except Exception as e:
+        return {"updated": False, "error": str(e)}
+
