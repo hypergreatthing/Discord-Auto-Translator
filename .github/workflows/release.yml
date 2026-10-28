@@ -1,0 +1,61 @@
+name: Auto-Publish Release on Push
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine version and build release ZIP
+        id: build_zip
+        run: |
+          BASE_VER=$(grep -oP '@version\s+\K[0-9]+\.[0-9]+\.[0-9]+' plugins/betterdiscord/DiscordAutoTranslator.plugin.js | head -n 1)
+          if [ -z "$BASE_VER" ]; then
+            BASE_VER="0.2.0"
+          fi
+          TAG="v${BASE_VER}.${GITHUB_RUN_NUMBER}"
+          ZIP_NAME="DiscordAutoTranslator-${TAG}.zip"
+
+          mkdir -p dist/DiscordAutoTranslator
+          rsync -av \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='.venv' \
+            --exclude='venv' \
+            --exclude='dist' \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='backend/models' \
+            ./ dist/DiscordAutoTranslator/
+
+          cd dist
+          zip -r "../${ZIP_NAME}" DiscordAutoTranslator
+          cd ..
+          cp "${ZIP_NAME}" "DiscordAutoTranslator-latest.zip"
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "zip_name=${ZIP_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.build_zip.outputs.tag }}
+          name: "Discord Auto-Translator ${{ steps.build_zip.outputs.tag }}"
+          generate_release_notes: true
+          make_latest: true
+          files: |
+            ${{ steps.build_zip.outputs.zip_name }}
+            DiscordAutoTranslator-latest.zip
+            plugins/betterdiscord/DiscordAutoTranslator.plugin.js
+            plugins/betterdiscord/DiscordVoiceTranslator.plugin.js

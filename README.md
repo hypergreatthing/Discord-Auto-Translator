@@ -31,6 +31,8 @@ discord auto translator/
 ├── backend/
 │   ├── main.py            # Daemon entry point (starts server + system tray)
 │   ├── engine.py          # CTranslate2 NLLB-200 offline translation engine
+│   ├── voice_engine.py    # Real-time per-user voice STT + translation engine (faster-whisper + WASAPI)
+│   ├── ru_slang.py        # Russian colloquialism & gaming slang normalizer
 │   ├── segmenter.py       # Multi-language Sentence Boundary Detector
 │   ├── masker.py          # Discord mention/emoji/link token protector
 │   ├── ocr.py             # Windows native hardware OCR with image caching
@@ -40,11 +42,13 @@ discord auto translator/
 │   └── config.py          # Config loader and persistence
 ├── plugins/
 │   ├── betterdiscord/
-│   │   └── DiscordAutoTranslator.plugin.js  # Drop-in BetterDiscord plugin
+│   │   ├── DiscordAutoTranslator.plugin.js   # Text, Channel, OCR & Outgoing Auto-Translator
+│   │   └── DiscordVoiceTranslator.plugin.js  # Per-User Real-Time Voice Translator (Subtitles + TTS)
 │   └── vencord/
 │       └── index.tsx                        # Vencord userplugin source
 ├── tests/
-│   └── test_components.py # Verification unit test suite
+│   ├── test_components.py # Verification unit test suite
+│   └── test_ru_slang.py   # Russian slang normalization tests
 └── start_translator.bat   # One-click Windows launcher
 ```
 
@@ -52,11 +56,11 @@ discord auto translator/
 
 ## 📥 Download
 
-1. Go to the [**Releases**](https://github.com/hypergreatthing/Discord-Auto-Translator/releases) page and download the latest `DiscordAutoTranslator-vX.Y.Z.zip`.
+1. [**Click here to download `DiscordAutoTranslator-latest.zip`**](https://github.com/hypergreatthing/Discord-Auto-Translator/releases/latest/download/DiscordAutoTranslator-latest.zip) *(or browse all versions on the [**Releases**](https://github.com/hypergreatthing/Discord-Auto-Translator/releases) page)*.
 2. **Right-click the ZIP → Extract All...** and pick a permanent folder (e.g. `Documents`). Don't run it from inside the ZIP.
 3. Open the extracted folder and double-click **`Easy_Install.bat`** (details below).
 
-> The first time the translator starts, it downloads the ~600 MB AI translation model once. After that it works fully offline.
+> The first time the translator starts, it downloads the ~600 MB AI translation model once. After that it works fully offline. Every code push to `main` automatically builds and publishes a new Release package.
 
 ---
 
