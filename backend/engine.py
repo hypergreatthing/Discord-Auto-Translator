@@ -18,6 +18,7 @@ except ImportError:
 
 from .segmenter import SentenceSegmenter
 from .masker import DiscordMasker
+from .ru_slang import normalize_ru
 from .config import load_config
 
 # Map common ISO-639-1 language codes to NLLB-200 language tokens
@@ -363,8 +364,14 @@ class TranslationEngine:
                 self.tokenizer.src_lang = src_nllb
                 target_prefix = [[tgt_nllb]] * len(batch_tasks)
 
+                use_ru_slang = (
+                    source_lang.lower().strip().split("-")[0] == "ru"
+                    and self.config.get("ru_slang_normalize", True)
+                )
                 tokenized_batch = [
-                    self.tokenizer.convert_ids_to_tokens(self.tokenizer.encode(task["content"]))
+                    self.tokenizer.convert_ids_to_tokens(
+                        self.tokenizer.encode(normalize_ru(task["content"]) if use_ru_slang else task["content"])
+                    )
                     for task in batch_tasks
                 ]
 

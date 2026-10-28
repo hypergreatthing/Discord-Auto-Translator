@@ -20,6 +20,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "default_target_lang": "en",       # Target language for viewing foreign text
     "default_reply_lang": "auto",      # Language to translate outgoing replies to ("auto" = last received foreign lang)
     "bilingual_reply": False,          # If True, sends both translated text and (original in parens)
+    "ru_slang_normalize": True,        # Rewrite Russian slang/chat shorthand to plain Russian before translating
 
     # Image & Link Settings
     "auto_ocr_images": False,          # False = On-demand (click to OCR, saves gaming CPU); True = Always auto-scan
