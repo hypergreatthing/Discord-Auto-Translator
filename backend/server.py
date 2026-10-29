@@ -163,6 +163,14 @@ class VoiceTrackUserRequest(BaseModel):
     target_lang: Optional[str] = "en"
     tts: Optional[bool] = True
     output_device_name: Optional[str] = None
+    voice_priority: Optional[str] = None
+    voice_threads: Optional[int] = None
+    whisper_model_size: Optional[str] = None
+
+class VoiceConfigRequest(BaseModel):
+    voice_priority: Optional[str] = None
+    voice_threads: Optional[int] = None
+    whisper_model_size: Optional[str] = None
 
 class VoiceSpeakingEventRequest(BaseModel):
     user_id: str
@@ -181,6 +189,14 @@ class VoiceAudioChunkRequest(BaseModel):
 def voice_status():
     return voice_engine_instance.get_status()
 
+@app.post("/voice/config")
+def voice_configure(req: VoiceConfigRequest):
+    return voice_engine_instance.configure_performance(
+        priority=req.voice_priority,
+        cpu_threads=req.voice_threads,
+        whisper_model_size=req.whisper_model_size,
+    )
+
 @app.post("/voice/track_user")
 def voice_track_user(req: VoiceTrackUserRequest):
     cfg = load_config()
@@ -193,6 +209,9 @@ def voice_track_user(req: VoiceTrackUserRequest):
         target_lang=tgt,
         tts=bool(req.tts),
         output_device_name=req.output_device_name,
+        voice_priority=req.voice_priority,
+        voice_threads=req.voice_threads,
+        whisper_model_size=req.whisper_model_size,
     )
 
 @app.post("/voice/clear_users")

@@ -8,12 +8,14 @@ PRIORITY_CLASSES = {
     "IDLE": 0x00000040,         # IDLE_PRIORITY_CLASS (Only runs when CPU is completely idle)
     "BELOW_NORMAL": 0x00004000, # BELOW_NORMAL_PRIORITY_CLASS (Gives games priority, perfectly smooth)
     "NORMAL": 0x00000020,       # NORMAL_PRIORITY_CLASS
+    "ABOVE_NORMAL": 0x00008000, # ABOVE_NORMAL_PRIORITY_CLASS (Fast real-time voice transcription)
+    "HIGH": 0x00000080,         # HIGH_PRIORITY_CLASS (Maximum responsiveness for real-time voice)
 }
 
 def set_process_priority(level: str = "BELOW_NORMAL") -> bool:
     """
     Sets the current process priority on Windows so background translations
-    never steal CPU cycles from high-refresh-rate gaming.
+    never steal CPU cycles from high-refresh-rate gaming (or boosts for real-time voice).
     """
     if sys.platform != "win32":
         return False
@@ -28,6 +30,10 @@ def set_process_priority(level: str = "BELOW_NORMAL") -> bool:
             p.nice(psutil.IDLE_PRIORITY_CLASS)
         elif level_upper == "BELOW_NORMAL":
             p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+        elif level_upper == "ABOVE_NORMAL":
+            p.nice(psutil.ABOVE_NORMAL_PRIORITY_CLASS)
+        elif level_upper == "HIGH":
+            p.nice(psutil.HIGH_PRIORITY_CLASS)
         else:
             p.nice(psutil.NORMAL_PRIORITY_CLASS)
         print(f"[Priority] Process priority successfully set to: {level_upper} via psutil")

@@ -2,14 +2,14 @@
  * @name DiscordVoiceTranslator
  * @author Antigravity
  * @description Real-time per-user voice translator for Discord voice channels. Right-click any user in a voice channel (or use the voice bar) to translate their spoken language into your default language with live captions and optional TTS voice dubbing. Shares the local companion backend.
- * @version 0.2.1
+ * @version 0.3.0
  * @source https://github.com/hypergreatthing/Discord-Auto-Translator
  * @updateUrl https://raw.githubusercontent.com/hypergreatthing/Discord-Auto-Translator/main/plugins/betterdiscord/DiscordVoiceTranslator.plugin.js
  */
 
 module.exports = class DiscordVoiceTranslator {
     constructor() {
-        this.version = "0.2.1";
+        this.version = "0.3.0";
         this.updateUrl = "https://raw.githubusercontent.com/hypergreatthing/Discord-Auto-Translator/main/plugins/betterdiscord/DiscordVoiceTranslator.plugin.js";
         this.defaultSettings = {
             targetLang: "en",
@@ -21,6 +21,9 @@ module.exports = class DiscordVoiceTranslator {
             ttsVolume: 0.95,
             ttsRate: 1.05,
             subtitleDurationSec: 8,
+            voicePriority: "ABOVE_NORMAL", // NORMAL | ABOVE_NORMAL | HIGH
+            voiceThreads: 6,               // 2..12 CPU threads for Whisper + NLLB
+            whisperModelSize: "base",      // tiny (fastest) | base (balanced) | small (most accurate)
             autoUpdate: true,
             serverUrl: "http://127.0.0.1:49152"
         };
@@ -28,7 +31,10 @@ module.exports = class DiscordVoiceTranslator {
 
         // { [userId]: { userId, username, sourceLang, tts, originalVolume } }
         this.trackedUsers = new Map();
-        this.speakingState = new Map(); // userId -> boolean
+        this.speakingState = new Map();       // userId -> boolean (debounced state sent to backend)
+        this.fluxSpeakingState = new Map();   // userId -> boolean (raw FluxDispatcher SPEAKING state)
+        this.lastPositiveSpeakAt = new Map(); // userId -> timestamp ms
+        this.ttsCooldownUntil = 0;
         this.lastCaptionSeq = 0;
 
         this.backendOnline = false;
@@ -63,6 +69,8 @@ module.exports = class DiscordVoiceTranslator {
         }
         this.trackedUsers.clear();
         this.speakingState.clear();
+        this.fluxSpeakingState.clear();
+        this.lastPositiveSpeakAt.clear();
         this.removeOverlayElements();
         this.clearStyles();
         console.log("[DiscordVoiceTranslator] Stopped.");
@@ -80,6 +88,9 @@ module.exports = class DiscordVoiceTranslator {
                 if (!saved || !("duckOriginalVolumeV2" in saved)) {
                     this.settings.duckOriginalVolume = false;
                 }
+                if (!this.settings.voicePriority) this.settings.voicePriority = "ABOVE_NORMAL";
+                if (!this.settings.voiceThreads) this.settings.voiceThreads = 6;
+                if (!this.settings.whisperModelSize) this.settings.whisperModelSize = "base";
             }
         } catch (e) {
             console.error("[DiscordVoiceTranslator] Failed to load settings:", e);
@@ -137,12 +148,30 @@ module.exports = class DiscordVoiceTranslator {
         if (this.backendOnline === online) return;
         this.backendOnline = online;
         if (online) {
+            this.syncPerformanceConfigWithBackend();
             // Re-sync any tracked users with the backend when it comes online
             for (const u of this.trackedUsers.values()) {
                 this.syncTrackedUserWithBackend(u, true);
             }
         }
         this.updateStatusPill();
+    }
+
+    async syncPerformanceConfigWithBackend() {
+        if (!this.backendOnline) return;
+        try {
+            await this.fetchWithTimeout("/voice/config", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    voice_priority: this.settings.voicePriority || "ABOVE_NORMAL",
+                    voice_threads: Number(this.settings.voiceThreads) || 6,
+                    whisper_model_size: this.settings.whisperModelSize || "base",
+                }),
+            }, 4000);
+        } catch (err) {
+            console.warn("[DiscordVoiceTranslator] Failed to sync voice performance config:", err);
+        }
     }
 
     async performHandshake() {
@@ -192,9 +221,30 @@ module.exports = class DiscordVoiceTranslator {
     /* ==========================================================
        Per-User Voice Tracking & Volume Ducking
        ========================================================== */
+    getCurrentUserId() {
+        try {
+            if (typeof BdApi !== "undefined" && BdApi.Webpack) {
+                const UserStore = BdApi.Webpack.getStore
+                    ? BdApi.Webpack.getStore("UserStore")
+                    : BdApi.Webpack.getByKeys("getCurrentUser", "getUser");
+                if (UserStore && typeof UserStore.getCurrentUser === "function") {
+                    const me = UserStore.getCurrentUser();
+                    if (me && me.id) return String(me.id);
+                }
+            }
+        } catch (_) {}
+        return null;
+    }
+
     async setUserVoiceTranslation(userId, username, sourceLang, enabled = true) {
         if (!userId) return;
         userId = String(userId);
+
+        const myId = this.getCurrentUserId();
+        if (enabled && myId && userId === myId) {
+            this.showToast("Cannot translate your own voice — right-click another person in the voice channel!", { type: "warning" });
+            return;
+        }
 
         if (!this.backendOnline) {
             this.showToast("Translator backend is offline! Start the companion daemon first.", { type: "error" });
@@ -222,7 +272,7 @@ module.exports = class DiscordVoiceTranslator {
 
             await this.syncTrackedUserWithBackend(entry, true);
             this.showToast(
-                `🎧 Translating ${entry.username}'s voice (${entry.sourceLang.toUpperCase()} → ${this.settings.targetLang.toUpperCase()})`,
+                `🎧 Translating ONLY ${entry.username}'s voice (${entry.sourceLang.toUpperCase()} → ${this.settings.targetLang.toUpperCase()})`,
                 { type: "success" }
             );
         } else {
@@ -232,6 +282,8 @@ module.exports = class DiscordVoiceTranslator {
             }
             this.trackedUsers.delete(userId);
             this.speakingState.delete(userId);
+            this.fluxSpeakingState.delete(userId);
+            this.lastPositiveSpeakAt.delete(userId);
             await this.syncTrackedUserWithBackend({ userId, username }, false);
             this.showToast(`Stopped translating ${username || "user"}'s voice.`, { type: "info" });
         }
@@ -254,6 +306,9 @@ module.exports = class DiscordVoiceTranslator {
                     target_lang: this.settings.targetLang || "en",
                     tts: !!this.settings.enableTts,
                     output_device_name: this.getDiscordOutputDeviceName(),
+                    voice_priority: this.settings.voicePriority || "ABOVE_NORMAL",
+                    voice_threads: Number(this.settings.voiceThreads) || 6,
+                    whisper_model_size: this.settings.whisperModelSize || "base",
                 }),
             }, 4000);
         } catch (err) {
@@ -333,6 +388,16 @@ module.exports = class DiscordVoiceTranslator {
     /* ==========================================================
        Discord SPEAKING Event Hooks (SpeakingStore + Flux + DOM)
        ========================================================== */
+    isLocalTtsActive() {
+        try {
+            if ("speechSynthesis" in window && window.speechSynthesis.speaking) {
+                this.ttsCooldownUntil = Date.now() + 350;
+                return true;
+            }
+        } catch (_) {}
+        return Date.now() < this.ttsCooldownUntil;
+    }
+
     hookSpeakingEvents() {
         // 1. Hook Discord's internal FluxDispatcher if available
         try {
@@ -342,9 +407,18 @@ module.exports = class DiscordVoiceTranslator {
                     const handler = (event) => {
                         if (!event || !event.userId) return;
                         const uid = String(event.userId);
+                        const myId = this.getCurrentUserId();
+                        if (myId && uid === myId) return; // Never trigger on our own voice
                         if (!this.trackedUsers.has(uid)) return;
-                        const isSpeaking = Boolean(event.speakingFlags && event.speakingFlags > 0);
-                        this.handleUserSpeakingChange(uid, isSpeaking);
+
+                        // Bit 0 (1) = VOICE speaking; ignore if local TTS is playing
+                        const flags = Number(event.speakingFlags || 0);
+                        const isSpeaking = (flags & 1) !== 0 && !this.isLocalTtsActive();
+                        this.fluxSpeakingState.set(uid, isSpeaking);
+                        if (isSpeaking) {
+                            this.lastPositiveSpeakAt.set(uid, Date.now());
+                            this.handleUserSpeakingChange(uid, true);
+                        }
                     };
                     Dispatcher.subscribe("SPEAKING", handler);
                     this.fluxUnsubscribe = () => {
@@ -356,11 +430,11 @@ module.exports = class DiscordVoiceTranslator {
             console.warn("[DiscordVoiceTranslator] FluxDispatcher hook fallback:", err);
         }
 
-        // 2. Poll Discord's SpeakingStore + DOM speaking indicators every 200ms
+        // 2. Poll Discord's SpeakingStore + DOM speaking indicators every 150ms
         this.uiScanTimer = setInterval(() => {
             this.decorateVoiceChannelUsers();
             this.pollDomSpeakingIndicators();
-        }, 200);
+        }, 150);
     }
 
     unhookSpeakingEvents() {
@@ -375,6 +449,9 @@ module.exports = class DiscordVoiceTranslator {
     }
 
     handleUserSpeakingChange(userId, isSpeaking) {
+        const myId = this.getCurrentUserId();
+        if (myId && userId === myId) return; // Strict safety guard against translating own mic/voice
+
         const prev = !!this.speakingState.get(userId);
         if (prev === isSpeaking) return;
         this.speakingState.set(userId, isSpeaking);
@@ -395,28 +472,66 @@ module.exports = class DiscordVoiceTranslator {
     pollDomSpeakingIndicators() {
         if (!this.backendOnline || this.trackedUsers.size === 0) return;
 
-        // Method A: Query Discord's internal SpeakingStore directly (works even when looking at text chat!)
+        const myId = this.getCurrentUserId();
+        const ttsPlaying = this.isLocalTtsActive();
+
+        // Gather speaking state from SpeakingStore + DOM rings + FluxDispatcher
+        let SpeakingStore = null;
         try {
             if (typeof BdApi !== "undefined" && BdApi.Webpack) {
-                const SpeakingStore = (BdApi.Webpack.getStore && BdApi.Webpack.getStore("SpeakingStore")) ||
-                                      BdApi.Webpack.getByKeys("isSpeaking", "getSpeakingPlayers");
-                if (SpeakingStore && typeof SpeakingStore.isSpeaking === "function") {
-                    for (const uid of this.trackedUsers.keys()) {
-                        const speaking = !!SpeakingStore.isSpeaking(uid);
-                        this.handleUserSpeakingChange(uid, speaking);
-                    }
-                    return;
-                }
+                SpeakingStore = (BdApi.Webpack.getStore && BdApi.Webpack.getStore("SpeakingStore")) ||
+                                BdApi.Webpack.getByKeys("isSpeaking", "getSpeakingPlayers");
             }
         } catch (_) {}
 
-        // Method B: DOM avatar speaking rings in the voice channel list
+        const domSpeakingUsers = new Set();
         document.querySelectorAll('[class*="voiceUser_"], [data-list-item-id^="voice-user"]').forEach((el) => {
-            const uid = el.dataset.dvtUserId;
+            const info = this.extractUserFromElement(el);
+            const uid = (info && info.userId) || el.dataset.dvtUserId;
             if (!uid || !this.trackedUsers.has(uid)) return;
-            const avatarSpeaking = !!el.querySelector('[class*="avatarSpeaking_"], [class*="speaking_"]');
-            this.handleUserSpeakingChange(uid, avatarSpeaking);
+            const hasRing = !!el.querySelector(
+                '[class*="avatarSpeaking_"], [class*="speaking_"], [class*="borderSpeaking_"], [aria-label*="Speaking"]'
+            );
+            if (hasRing) domSpeakingUsers.add(uid);
         });
+
+        const now = Date.now();
+        const HOLD_MS = 450; // Keep speech gate open across short inter-word pauses
+
+        for (const uid of this.trackedUsers.keys()) {
+            if (myId && uid === myId) continue;
+
+            if (ttsPlaying) {
+                this.handleUserSpeakingChange(uid, false);
+                continue;
+            }
+
+            let storeSpeaking = false;
+            if (SpeakingStore) {
+                try {
+                    if (typeof SpeakingStore.isSpeaking === "function") {
+                        storeSpeaking = !!SpeakingStore.isSpeaking(uid);
+                    }
+                    if (!storeSpeaking && typeof SpeakingStore.getSpeakingPlayers === "function") {
+                        const players = SpeakingStore.getSpeakingPlayers();
+                        if (players && players[uid]) storeSpeaking = true;
+                    }
+                } catch (_) {}
+            }
+
+            const fluxSpeaking = !!this.fluxSpeakingState.get(uid);
+            const domSpeaking = domSpeakingUsers.has(uid);
+            const currentlyDetected = fluxSpeaking || storeSpeaking || domSpeaking;
+
+            if (currentlyDetected) {
+                this.lastPositiveSpeakAt.set(uid, now);
+                this.handleUserSpeakingChange(uid, true);
+            } else {
+                const lastPos = this.lastPositiveSpeakAt.get(uid) || 0;
+                const held = (now - lastPos) < HOLD_MS;
+                this.handleUserSpeakingChange(uid, held);
+            }
+        }
     }
 
     /* ==========================================================
@@ -494,6 +609,12 @@ module.exports = class DiscordVoiceTranslator {
     injectContextMenuItem(userInfo, x, y) {
         document.querySelectorAll(".dvt-context-box").forEach((b) => b.remove());
 
+        const myId = this.getCurrentUserId();
+        if (myId && String(userInfo.userId) === myId) {
+            // Do not offer voice translation on the local user's own row
+            return;
+        }
+
         const isTracked = this.trackedUsers.has(userInfo.userId);
         const currentEntry = this.trackedUsers.get(userInfo.userId);
         const selectedLang = (currentEntry && currentEntry.sourceLang) || this.settings.defaultSourceLang || "ru";
@@ -503,7 +624,7 @@ module.exports = class DiscordVoiceTranslator {
 
         const header = document.createElement("div");
         header.className = "dvt-context-title";
-        header.textContent = `🎧 Voice Translate: ${userInfo.username}`;
+        header.textContent = `🎧 Voice Translate ONLY: ${userInfo.username}`;
         box.appendChild(header);
 
         const toggleBtn = document.createElement("button");
@@ -522,6 +643,20 @@ module.exports = class DiscordVoiceTranslator {
             langSelect.appendChild(opt);
         });
 
+        const prioSelect = document.createElement("select");
+        prioSelect.className = "dvt-context-select";
+        [
+            { value: "ABOVE_NORMAL", label: "⚡ CPU Priority: Above Normal (Fast)" },
+            { value: "HIGH", label: "🔥 CPU Priority: High (Max Speed)" },
+            { value: "NORMAL", label: "⚖️ CPU Priority: Normal" },
+        ].forEach((p) => {
+            const opt = document.createElement("option");
+            opt.value = p.value;
+            opt.textContent = p.label;
+            if ((this.settings.voicePriority || "ABOVE_NORMAL") === p.value) opt.selected = true;
+            prioSelect.appendChild(opt);
+        });
+
         toggleBtn.onclick = (ev) => {
             ev.stopPropagation();
             this.setUserVoiceTranslation(userInfo.userId, userInfo.username, langSelect.value, !isTracked);
@@ -537,8 +672,16 @@ module.exports = class DiscordVoiceTranslator {
             }
         };
 
+        prioSelect.onchange = (ev) => {
+            ev.stopPropagation();
+            this.settings.voicePriority = prioSelect.value;
+            this.saveSettings();
+            this.syncPerformanceConfigWithBackend();
+        };
+
         box.appendChild(toggleBtn);
         box.appendChild(langSelect);
+        box.appendChild(prioSelect);
 
         // Try attaching inside Discord's open context menu if present; otherwise position near cursor
         const menu = document.querySelector('[role="menu"][class*="menu_"]');
@@ -547,7 +690,7 @@ module.exports = class DiscordVoiceTranslator {
         } else {
             box.style.position = "fixed";
             box.style.left = `${Math.min(window.innerWidth - 260, Math.max(12, x))}px`;
-            box.style.top = `${Math.min(window.innerHeight - 130, Math.max(12, y))}px`;
+            box.style.top = `${Math.min(window.innerHeight - 165, Math.max(12, y))}px`;
             document.body.appendChild(box);
             const close = (ev) => {
                 if (!box.contains(ev.target)) {
@@ -606,7 +749,7 @@ module.exports = class DiscordVoiceTranslator {
                     }
                 }
             } catch (_) {}
-        }, 450);
+        }, 350);
     }
 
     stopCaptionPolling() {
@@ -618,6 +761,9 @@ module.exports = class DiscordVoiceTranslator {
 
     handleIncomingCaption(cap) {
         if (!cap || !cap.translated_text) return;
+        // Only display captions for users we are currently tracking
+        if (cap.user_id && !this.trackedUsers.has(String(cap.user_id))) return;
+
         if (this.settings.enableSubtitles) {
             this.renderSubtitleToast(cap);
         }
@@ -676,6 +822,12 @@ module.exports = class DiscordVoiceTranslator {
             utter.lang = langCode || "en-US";
             utter.volume = Math.min(1, Math.max(0.1, Number(this.settings.ttsVolume) || 0.9));
             utter.rate = Math.min(1.5, Math.max(0.7, Number(this.settings.ttsRate) || 1.05));
+            utter.onstart = () => {
+                this.ttsCooldownUntil = Date.now() + 2500;
+            };
+            utter.onend = () => {
+                this.ttsCooldownUntil = Date.now() + 400;
+            };
             window.speechSynthesis.speak(utter);
         } catch (e) {
             console.warn("[DiscordVoiceTranslator] TTS playback error:", e);
@@ -927,8 +1079,8 @@ module.exports = class DiscordVoiceTranslator {
         panel.innerHTML = `
             <h2 style="color: white; margin-bottom: 6px;">Discord Voice Translator <span style="font-size: 0.7em; color: #8e9297;">v${this.version}</span></h2>
             <p style="color: #b9bbbe; font-size: 12px; margin-bottom: 14px;">
-                Right-click any user inside a Discord voice channel to start or stop translating their voice in real time.
-                Note: Active voice translation temporarily boosts the companion backend to NORMAL CPU priority (4 threads).
+                Right-click any other user inside a Discord voice channel to translate ONLY their spoken voice in real time.
+                Your own microphone and unselected users in the call are strictly ignored.
             </p>
 
             <div style="margin-bottom: 14px;">
@@ -943,6 +1095,37 @@ module.exports = class DiscordVoiceTranslator {
                 <select id="dvt-source-lang" style="background: #2f3136; color: white; border: 1px solid #202225; padding: 6px; border-radius: 4px; width: 100%;">
                     ${this.getSupportedLanguages().map((l) => `<option value="${l.code}" ${this.settings.defaultSourceLang === l.code ? "selected" : ""}>${l.name}</option>`).join("")}
                 </select>
+            </div>
+
+            <div style="margin-bottom: 14px; padding: 10px; background: rgba(88, 101, 242, 0.1); border: 1px solid rgba(88, 101, 242, 0.35); border-radius: 6px;">
+                <div style="font-weight: 700; color: #ffffff; margin-bottom: 8px; font-size: 13px;">⚡ Voice Translation Speed & CPU Priority</div>
+
+                <div style="margin-bottom: 10px;">
+                    <label style="display: block; font-weight: 600; margin-bottom: 4px; font-size: 12px;">Backend CPU Priority (While Translating Voice):</label>
+                    <select id="dvt-voice-priority" style="background: #2f3136; color: white; border: 1px solid #202225; padding: 6px; border-radius: 4px; width: 100%;">
+                        <option value="ABOVE_NORMAL" ${this.settings.voicePriority === "ABOVE_NORMAL" ? "selected" : ""}>⚡ Above Normal Priority (Recommended — keeps up with live speech)</option>
+                        <option value="HIGH" ${this.settings.voicePriority === "HIGH" ? "selected" : ""}>🔥 High Priority (Maximum speed & lowest latency)</option>
+                        <option value="NORMAL" ${this.settings.voicePriority === "NORMAL" ? "selected" : ""}>⚖️ Normal Priority (Standard CPU scheduling)</option>
+                    </select>
+                </div>
+
+                <div style="margin-bottom: 10px;">
+                    <label style="display: block; font-weight: 600; margin-bottom: 4px; font-size: 12px;">Allocated CPU Threads for Voice Recognition:</label>
+                    <select id="dvt-voice-threads" style="background: #2f3136; color: white; border: 1px solid #202225; padding: 6px; border-radius: 4px; width: 100%;">
+                        <option value="4" ${Number(this.settings.voiceThreads) === 4 ? "selected" : ""}>4 Threads (Light)</option>
+                        <option value="6" ${Number(this.settings.voiceThreads) === 6 ? "selected" : ""}>6 Threads (Recommended)</option>
+                        <option value="8" ${Number(this.settings.voiceThreads) === 8 ? "selected" : ""}>8 Threads (Fastest multi-core decoding)</option>
+                    </select>
+                </div>
+
+                <div>
+                    <label style="display: block; font-weight: 600; margin-bottom: 4px; font-size: 12px;">Whisper Speech Model Speed vs. Accuracy:</label>
+                    <select id="dvt-whisper-model" style="background: #2f3136; color: white; border: 1px solid #202225; padding: 6px; border-radius: 4px; width: 100%;">
+                        <option value="tiny" ${this.settings.whisperModelSize === "tiny" ? "selected" : ""}>🚀 Ultra-Fast (whisper-tiny — lowest lag for fast speakers)</option>
+                        <option value="base" ${this.settings.whisperModelSize === "base" ? "selected" : ""}>⚡ Balanced (whisper-base — default accuracy & speed)</option>
+                        <option value="small" ${this.settings.whisperModelSize === "small" ? "selected" : ""}>🎯 High Accuracy (whisper-small — heavier CPU usage)</option>
+                    </select>
+                </div>
             </div>
 
             <div style="margin-bottom: 12px;">
@@ -982,6 +1165,24 @@ module.exports = class DiscordVoiceTranslator {
         panel.querySelector("#dvt-source-lang").onchange = (e) => {
             this.settings.defaultSourceLang = e.target.value;
             this.saveSettings();
+        };
+        panel.querySelector("#dvt-voice-priority").onchange = (e) => {
+            this.settings.voicePriority = e.target.value;
+            this.saveSettings();
+            this.syncPerformanceConfigWithBackend();
+            this.showToast(`Voice CPU Priority set to ${e.target.value}`, { type: "info" });
+        };
+        panel.querySelector("#dvt-voice-threads").onchange = (e) => {
+            this.settings.voiceThreads = parseInt(e.target.value, 10) || 6;
+            this.saveSettings();
+            this.syncPerformanceConfigWithBackend();
+            this.showToast(`Voice CPU Threads set to ${this.settings.voiceThreads}`, { type: "info" });
+        };
+        panel.querySelector("#dvt-whisper-model").onchange = (e) => {
+            this.settings.whisperModelSize = e.target.value;
+            this.saveSettings();
+            this.syncPerformanceConfigWithBackend();
+            this.showToast(`Whisper speech model set to ${e.target.value}`, { type: "info" });
         };
         panel.querySelector("#dvt-subtitles").onchange = (e) => {
             this.settings.enableSubtitles = e.target.checked;
