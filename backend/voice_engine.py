@@ -149,8 +149,11 @@ class VoiceTranslatorEngine:
         source_lang: str = "ru",
         target_lang: str = "en",
         tts: bool = True,
+        output_device_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         user_id = str(user_id)
+        if output_device_name and output_device_name.lower() not in ("default", ""):
+            self._preferred_output_name = output_device_name.strip()
         if enabled:
             self.tracked_users[user_id] = {
                 "user_id": user_id,
@@ -390,41 +393,42 @@ class VoiceTranslatorEngine:
         return [c for c in self.recent_captions if c["seq"] > since_seq]
 
     # ------------------------------------------------------------------
-    # Multi-Device Windows WASAPI Loopback Capture + Automatic Energy VAD
+    # Single-Device Windows WASAPI Loopback Capture (Discord Speaker Output)
     # ------------------------------------------------------------------
+    def _select_loopback_device(self, p: Any) -> Dict[str, Any]:
+        """
+        Picks the loopback device matching Discord's configured speaker output
+        (if passed by the plugin), or Windows' default WASAPI speaker output.
+        """
+        preferred = getattr(self, "_preferred_output_name", None)
+        if preferred:
+            pref_lower = preferred.lower()
+            for dev in p.get_loopback_device_info_generator():
+                dev_name = (dev.get("name") or "").lower()
+                if pref_lower in dev_name or dev_name.replace(" [loopback]", "") in pref_lower:
+                    return dict(dev)
+
+        # Fallback: Windows default speaker output loopback (e.g., 'Speakers (Realtek(R) Audio) [Loopback]')
+        return dict(p.get_default_wasapi_loopback())
+
     def _start_wasapi_loopback(self) -> None:
         if not WASAPI_AVAILABLE or self._loopback_running:
             return
         self._loopback_running = True
-        self._loopback_threads = []
-        try:
-            p = pyaudio.PyAudio()
-            seen_names = set()
-            loopback_devices = []
-            for dev in p.get_loopback_device_info_generator():
-                name = dev.get("name", "")
-                if name in seen_names:
-                    continue
-                seen_names.add(name)
-                loopback_devices.append(dict(dev))
-            p.terminate()
-
-            for dev in loopback_devices:
-                t = threading.Thread(target=self._wasapi_device_loop, args=(dev,), daemon=True)
-                t.start()
-                self._loopback_threads.append(t)
-        except Exception as e:
-            print(f"[VoiceEngine] Failed to enumerate WASAPI loopback devices: {e}")
-            self._loopback_running = False
+        t = threading.Thread(target=self._wasapi_single_device_loop, daemon=True)
+        t.start()
+        self._loopback_threads = [t]
 
     def _stop_wasapi_loopback(self) -> None:
         self._loopback_running = False
 
-    def _wasapi_device_loop(self, dev_info: Dict[str, Any]) -> None:
+    def _wasapi_single_device_loop(self) -> None:
         p = None
         stream = None
+        dev_info: Dict[str, Any] = {}
         try:
             p = pyaudio.PyAudio()
+            dev_info = self._select_loopback_device(p)
             rate = int(dev_info.get("defaultSampleRate") or 48000)
             channels = int(dev_info.get("maxInputChannels") or 2)
             chunk_frames = int(rate * 0.1)  # 100ms slices
@@ -437,7 +441,7 @@ class VoiceTranslatorEngine:
                 input=True,
                 input_device_index=dev_info["index"],
             )
-            print(f"[VoiceEngine] WASAPI loopback listening on '{dev_info['name']}' ({rate}Hz, {channels}ch)")
+            print(f"[VoiceEngine] WASAPI loopback listening on Discord speaker '{dev_info['name']}' ({rate}Hz, {channels}ch)")
 
             vad_frames: List[np.ndarray] = []
             silent_chunks = 0
@@ -451,7 +455,6 @@ class VoiceTranslatorEngine:
                     pcm = pcm.reshape(-1, channels).mean(axis=1)
 
                 rms = float(np.sqrt(np.mean(np.square(pcm))))
-                # Ignore completely silent audio devices so idle monitors/cards use 0 CPU
                 if rms < 0.0012 and not vad_frames:
                     continue
 
@@ -486,7 +489,7 @@ class VoiceTranslatorEngine:
                                 ).start()
                     continue
 
-                # Mode 2: Automatic Energy VAD fallback (works even if Discord hides SPEAKING events or user is in another tab)
+                # Mode 2: Automatic Energy VAD fallback
                 if rms >= 0.0018:
                     vad_frames.append(pcm_16k)
                     silent_chunks = 0
@@ -504,7 +507,6 @@ class VoiceTranslatorEngine:
                 elif vad_frames:
                     silent_chunks += 1
                     vad_frames.append(pcm_16k)
-                    # After ~0.6s of silence (6 x 100ms), flush the spoken phrase
                     if silent_chunks >= 6:
                         utterance = np.concatenate(vad_frames, axis=0)
                         vad_frames = []
@@ -519,8 +521,9 @@ class VoiceTranslatorEngine:
                                 ).start()
 
         except Exception as e:
-            print(f"[VoiceEngine] Loopback device '{dev_info.get('name')}' stopped: {e}")
+            print(f"[VoiceEngine] Loopback device '{dev_info.get('name', 'default')}' stopped: {e}")
         finally:
+            self._loopback_running = False
             try:
                 if stream:
                     stream.stop_stream()

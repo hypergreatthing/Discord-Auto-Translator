@@ -162,6 +162,7 @@ class VoiceTrackUserRequest(BaseModel):
     source_lang: Optional[str] = "ru"
     target_lang: Optional[str] = "en"
     tts: Optional[bool] = True
+    output_device_name: Optional[str] = None
 
 class VoiceSpeakingEventRequest(BaseModel):
     user_id: str
@@ -191,6 +192,7 @@ def voice_track_user(req: VoiceTrackUserRequest):
         source_lang=req.source_lang or "auto",
         target_lang=tgt,
         tts=bool(req.tts),
+        output_device_name=req.output_device_name,
     )
 
 @app.post("/voice/clear_users")

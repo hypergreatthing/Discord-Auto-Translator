@@ -2,14 +2,14 @@
  * @name DiscordVoiceTranslator
  * @author Antigravity
  * @description Real-time per-user voice translator for Discord voice channels. Right-click any user in a voice channel (or use the voice bar) to translate their spoken language into your default language with live captions and optional TTS voice dubbing. Shares the local companion backend.
- * @version 0.2.0
+ * @version 0.2.1
  * @source https://github.com/hypergreatthing/Discord-Auto-Translator
  * @updateUrl https://raw.githubusercontent.com/hypergreatthing/Discord-Auto-Translator/main/plugins/betterdiscord/DiscordVoiceTranslator.plugin.js
  */
 
 module.exports = class DiscordVoiceTranslator {
     constructor() {
-        this.version = "0.2.0";
+        this.version = "0.2.1";
         this.updateUrl = "https://raw.githubusercontent.com/hypergreatthing/Discord-Auto-Translator/main/plugins/betterdiscord/DiscordVoiceTranslator.plugin.js";
         this.defaultSettings = {
             targetLang: "en",
@@ -253,11 +253,33 @@ module.exports = class DiscordVoiceTranslator {
                     source_lang: entry.sourceLang || "auto",
                     target_lang: this.settings.targetLang || "en",
                     tts: !!this.settings.enableTts,
+                    output_device_name: this.getDiscordOutputDeviceName(),
                 }),
             }, 4000);
         } catch (err) {
             console.warn("[DiscordVoiceTranslator] Failed to sync tracked user:", err);
         }
+    }
+
+    getDiscordOutputDeviceName() {
+        try {
+            if (typeof BdApi !== "undefined" && BdApi.Webpack) {
+                const MediaEngineStore = BdApi.Webpack.getStore
+                    ? BdApi.Webpack.getStore("MediaEngineStore")
+                    : BdApi.Webpack.getByKeys("getOutputDeviceId", "getOutputDevices");
+                if (MediaEngineStore && typeof MediaEngineStore.getOutputDeviceId === "function") {
+                    const outId = MediaEngineStore.getOutputDeviceId();
+                    if (!outId || outId === "default") return "default";
+                    const devices = typeof MediaEngineStore.getOutputDevices === "function"
+                        ? MediaEngineStore.getOutputDevices()
+                        : null;
+                    if (devices && devices[outId] && devices[outId].name) {
+                        return devices[outId].name;
+                    }
+                }
+            }
+        } catch (_) {}
+        return "default";
     }
 
     getUserLocalVolume(userId) {
