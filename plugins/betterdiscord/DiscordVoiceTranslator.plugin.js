@@ -2,23 +2,23 @@
  * @name DiscordVoiceTranslator
  * @author Antigravity
  * @description Real-time per-user voice translator for Discord voice channels. Right-click any user in a voice channel (or use the voice bar) to translate their spoken language into your default language with live captions and optional TTS voice dubbing. Shares the local companion backend.
- * @version 0.1.0
+ * @version 0.2.0
  * @source https://github.com/hypergreatthing/Discord-Auto-Translator
  * @updateUrl https://raw.githubusercontent.com/hypergreatthing/Discord-Auto-Translator/main/plugins/betterdiscord/DiscordVoiceTranslator.plugin.js
  */
 
 module.exports = class DiscordVoiceTranslator {
     constructor() {
-        this.version = "0.1.0";
+        this.version = "0.2.0";
         this.updateUrl = "https://raw.githubusercontent.com/hypergreatthing/Discord-Auto-Translator/main/plugins/betterdiscord/DiscordVoiceTranslator.plugin.js";
         this.defaultSettings = {
             targetLang: "en",
             defaultSourceLang: "ru",
             enableSubtitles: true,
             enableTts: true,
-            duckOriginalVolume: true,
-            duckedVolumePercent: 20,   // Lower original speaker volume to 20% when TTS dubbing is on
-            ttsVolume: 0.9,
+            duckOriginalVolume: false,  // Keep OFF by default because WASAPI loopback records post-volume output
+            duckedVolumePercent: 35,
+            ttsVolume: 0.95,
             ttsRate: 1.05,
             subtitleDurationSec: 8,
             autoUpdate: true,
@@ -76,6 +76,10 @@ module.exports = class DiscordVoiceTranslator {
             if (typeof BdApi !== "undefined" && BdApi.Data) {
                 const saved = BdApi.Data.load("DiscordVoiceTranslator", "settings");
                 if (saved) Object.assign(this.settings, saved);
+                // Keep volume ducking off by default so WASAPI loopback receives full speaker signal
+                if (!saved || !("duckOriginalVolumeV2" in saved)) {
+                    this.settings.duckOriginalVolume = false;
+                }
             }
         } catch (e) {
             console.error("[DiscordVoiceTranslator] Failed to load settings:", e);
@@ -211,6 +215,9 @@ module.exports = class DiscordVoiceTranslator {
 
             if (this.settings.enableTts && this.settings.duckOriginalVolume) {
                 this.setUserLocalVolume(userId, this.settings.duckedVolumePercent);
+            } else if (typeof origVol === "number" && origVol < 50) {
+                // Restore volume if it was previously ducked so WASAPI loopback hears full audio
+                this.setUserLocalVolume(userId, 100);
             }
 
             await this.syncTrackedUserWithBackend(entry, true);
@@ -302,10 +309,10 @@ module.exports = class DiscordVoiceTranslator {
     }
 
     /* ==========================================================
-       Discord SPEAKING Event Hooks (FluxDispatcher + DOM Fallback)
+       Discord SPEAKING Event Hooks (SpeakingStore + Flux + DOM)
        ========================================================== */
     hookSpeakingEvents() {
-        // 1. Hook Discord's internal FluxDispatcher for instant SPEAKING events
+        // 1. Hook Discord's internal FluxDispatcher if available
         try {
             if (typeof BdApi !== "undefined" && BdApi.Webpack) {
                 const Dispatcher = BdApi.Webpack.getByKeys("dispatch", "subscribe");
@@ -327,11 +334,11 @@ module.exports = class DiscordVoiceTranslator {
             console.warn("[DiscordVoiceTranslator] FluxDispatcher hook fallback:", err);
         }
 
-        // 2. Periodic DOM & VoiceState fallback + voice user badge decorator
+        // 2. Poll Discord's SpeakingStore + DOM speaking indicators every 200ms
         this.uiScanTimer = setInterval(() => {
             this.decorateVoiceChannelUsers();
             this.pollDomSpeakingIndicators();
-        }, 250);
+        }, 200);
     }
 
     unhookSpeakingEvents() {
@@ -365,7 +372,23 @@ module.exports = class DiscordVoiceTranslator {
 
     pollDomSpeakingIndicators() {
         if (!this.backendOnline || this.trackedUsers.size === 0) return;
-        // Fallback if FluxDispatcher wasn't matched: check avatar speaking rings in the voice channel list
+
+        // Method A: Query Discord's internal SpeakingStore directly (works even when looking at text chat!)
+        try {
+            if (typeof BdApi !== "undefined" && BdApi.Webpack) {
+                const SpeakingStore = (BdApi.Webpack.getStore && BdApi.Webpack.getStore("SpeakingStore")) ||
+                                      BdApi.Webpack.getByKeys("isSpeaking", "getSpeakingPlayers");
+                if (SpeakingStore && typeof SpeakingStore.isSpeaking === "function") {
+                    for (const uid of this.trackedUsers.keys()) {
+                        const speaking = !!SpeakingStore.isSpeaking(uid);
+                        this.handleUserSpeakingChange(uid, speaking);
+                    }
+                    return;
+                }
+            }
+        } catch (_) {}
+
+        // Method B: DOM avatar speaking rings in the voice channel list
         document.querySelectorAll('[class*="voiceUser_"], [data-list-item-id^="voice-user"]').forEach((el) => {
             const uid = el.dataset.dvtUserId;
             if (!uid || !this.trackedUsers.has(uid)) return;

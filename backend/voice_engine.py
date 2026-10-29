@@ -56,16 +56,18 @@ class VoiceTranslatorEngine:
 
         # Active speaking buffers per user (for WASAPI loopback demux or chunk assembly)
         self.speaking_state: Dict[str, Dict[str, Any]] = {}
+        self._last_explicit_speaking_ts: float = 0.0
 
         # Recent translated captions ring buffer (for polling or WebSocket broadcast)
         self.recent_captions: List[Dict[str, Any]] = []
         self._caption_seq: int = 0
         self._listeners: List[Callable[[Dict[str, Any]], None]] = []
 
-        # WASAPI loopback background thread
-        self._loopback_thread: Optional[threading.Thread] = None
+        # WASAPI loopback background threads (one per loopback output device so MOTU/Realtek/Monitor all work)
+        self._loopback_threads: List[threading.Thread] = []
         self._loopback_running: bool = False
         self._boosted_priority: bool = False
+        self._transcribe_busy: bool = False
 
     def get_status(self) -> Dict[str, Any]:
         return {
@@ -77,6 +79,7 @@ class VoiceTranslatorEngine:
             "load_error": self.load_error,
             "tracked_users": self.tracked_users,
             "boosted_priority": self._boosted_priority,
+            "loopback_running": self._loopback_running,
         }
 
     def _sync_priority_for_voice(self) -> None:
@@ -157,6 +160,8 @@ class VoiceTranslatorEngine:
                 "tts": bool(tts),
             }
             self._sync_priority_for_voice()
+            # Pre-load Whisper and NLLB models in background right away so the first utterance isn't dropped!
+            threading.Thread(target=self._warmup_models, daemon=True).start()
             if WASAPI_AVAILABLE and not self._loopback_running:
                 self._start_wasapi_loopback()
         else:
@@ -167,6 +172,11 @@ class VoiceTranslatorEngine:
                 self._stop_wasapi_loopback()
 
         return self.get_status()
+
+    def _warmup_models(self) -> None:
+        self.ensure_whisper_loaded()
+        if not engine_instance.is_ready:
+            engine_instance.load_model()
 
     def clear_tracked_users(self) -> Dict[str, Any]:
         self.tracked_users.clear()
@@ -187,6 +197,7 @@ class VoiceTranslatorEngine:
         if user_id not in self.tracked_users:
             return None
 
+        self._last_explicit_speaking_ts = time.time()
         if username:
             self.tracked_users[user_id]["username"] = username
 
@@ -208,7 +219,6 @@ class VoiceTranslatorEngine:
             if not frames:
                 return None
             pcm_16k = np.concatenate(frames, axis=0)
-            # Ignore very short mic clicks (<0.35s at 16kHz)
             if len(pcm_16k) < int(16000 * 0.35):
                 return None
             threading.Thread(
@@ -254,7 +264,6 @@ class VoiceTranslatorEngine:
         )
 
     def _decode_to_float32_16k(self, raw_bytes: bytes, sample_rate: int) -> np.ndarray:
-        # Check if WAV header is present
         if raw_bytes[:4] == b"RIFF":
             with wave.open(io.BytesIO(raw_bytes), "rb") as wf:
                 channels = wf.getnchannels()
@@ -278,16 +287,22 @@ class VoiceTranslatorEngine:
         return pcm
 
     def _process_utterance_numpy(self, user_id: str, pcm_16k: np.ndarray) -> None:
+        if self._transcribe_busy:
+            return
         user_cfg = self.tracked_users.get(user_id)
         if not user_cfg:
             return
-        self._transcribe_and_translate(
-            user_id=user_id,
-            username=user_cfg.get("username", "User"),
-            pcm_16k=pcm_16k,
-            source_lang=user_cfg.get("source_lang", "auto"),
-            target_lang=user_cfg.get("target_lang", "en"),
-        )
+        self._transcribe_busy = True
+        try:
+            self._transcribe_and_translate(
+                user_id=user_id,
+                username=user_cfg.get("username", "User"),
+                pcm_16k=pcm_16k,
+                source_lang=user_cfg.get("source_lang", "auto"),
+                target_lang=user_cfg.get("target_lang", "en"),
+            )
+        finally:
+            self._transcribe_busy = False
 
     def _transcribe_and_translate(
         self,
@@ -297,10 +312,15 @@ class VoiceTranslatorEngine:
         source_lang: str,
         target_lang: str,
     ) -> Dict[str, Any]:
-        # Skip near-silent buffers
+        # Normalize audio gain so quiet/ducked speakers are still transcribed clearly by Whisper
+        peak = float(np.max(np.abs(pcm_16k))) if len(pcm_16k) else 0.0
         rms = float(np.sqrt(np.mean(np.square(pcm_16k)))) if len(pcm_16k) else 0.0
-        if rms < 0.004:
+        if rms < 0.0012 or peak < 0.004:
             return {"skipped": True, "reason": "silence"}
+
+        if peak > 0 and peak < 0.5:
+            gain = min(12.0, 0.65 / peak)
+            pcm_16k = np.clip(pcm_16k * gain, -1.0, 1.0).astype(np.float32)
 
         if not self.ensure_whisper_loaded():
             return {"error": self.load_error or "Whisper model unavailable"}
@@ -319,10 +339,13 @@ class VoiceTranslatorEngine:
             transcript = " ".join(seg.text.strip() for seg in segments if seg.text).strip()
             detected_lang = (info.language if info and getattr(info, "language", None) else (whisper_lang or "auto"))
         except Exception as e:
+            print(f"[VoiceEngine] Whisper transcription error: {e}")
             return {"error": f"Transcription error: {e}"}
 
         if not transcript or len(transcript) < 2:
             return {"skipped": True, "reason": "empty transcript"}
+
+        print(f"[VoiceEngine] Heard ({detected_lang}) from {username}: {transcript}")
 
         # Translate via the shared NLLB + Russian slang engine so colloquialisms are handled!
         eff_source = detected_lang if source_lang == "auto" else source_lang
@@ -336,6 +359,8 @@ class VoiceTranslatorEngine:
                 mode="deep_thought",
             )
             translated_text = mt_res.get("translated_text") or transcript
+
+        print(f"[VoiceEngine] Translated ({eff_source} -> {target_lang}): {translated_text}")
 
         self._caption_seq += 1
         event = {
@@ -365,33 +390,43 @@ class VoiceTranslatorEngine:
         return [c for c in self.recent_captions if c["seq"] > since_seq]
 
     # ------------------------------------------------------------------
-    # Windows WASAPI Loopback Capture (zero-config fallback)
+    # Multi-Device Windows WASAPI Loopback Capture + Automatic Energy VAD
     # ------------------------------------------------------------------
     def _start_wasapi_loopback(self) -> None:
         if not WASAPI_AVAILABLE or self._loopback_running:
             return
         self._loopback_running = True
-        self._loopback_thread = threading.Thread(target=self._wasapi_loop, daemon=True)
-        self._loopback_thread.start()
+        self._loopback_threads = []
+        try:
+            p = pyaudio.PyAudio()
+            seen_names = set()
+            loopback_devices = []
+            for dev in p.get_loopback_device_info_generator():
+                name = dev.get("name", "")
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
+                loopback_devices.append(dict(dev))
+            p.terminate()
+
+            for dev in loopback_devices:
+                t = threading.Thread(target=self._wasapi_device_loop, args=(dev,), daemon=True)
+                t.start()
+                self._loopback_threads.append(t)
+        except Exception as e:
+            print(f"[VoiceEngine] Failed to enumerate WASAPI loopback devices: {e}")
+            self._loopback_running = False
 
     def _stop_wasapi_loopback(self) -> None:
         self._loopback_running = False
 
-    def _wasapi_loop(self) -> None:
+    def _wasapi_device_loop(self, dev_info: Dict[str, Any]) -> None:
         p = None
         stream = None
         try:
             p = pyaudio.PyAudio()
-            wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
-            default_speakers = p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
-            if not default_speakers.get("isLoopbackDevice"):
-                for loopback in p.get_loopback_device_info_generator():
-                    if default_speakers["name"] in loopback["name"]:
-                        default_speakers = loopback
-                        break
-
-            rate = int(default_speakers["defaultSampleRate"])
-            channels = int(default_speakers["maxInputChannels"]) or 2
+            rate = int(dev_info.get("defaultSampleRate") or 48000)
+            channels = int(dev_info.get("maxInputChannels") or 2)
             chunk_frames = int(rate * 0.1)  # 100ms slices
 
             stream = p.open(
@@ -400,49 +435,92 @@ class VoiceTranslatorEngine:
                 rate=rate,
                 frames_per_buffer=chunk_frames,
                 input=True,
-                input_device_index=default_speakers["index"],
+                input_device_index=dev_info["index"],
             )
-            print(f"[VoiceEngine] WASAPI loopback active on '{default_speakers['name']}' ({rate}Hz, {channels}ch)")
+            print(f"[VoiceEngine] WASAPI loopback listening on '{dev_info['name']}' ({rate}Hz, {channels}ch)")
+
+            vad_frames: List[np.ndarray] = []
+            silent_chunks = 0
 
             while self._loopback_running and self.tracked_users:
                 raw = stream.read(chunk_frames, exception_on_overflow=False)
-                active_ids = [uid for uid, st in self.speaking_state.items() if st.get("active")]
-                if not active_ids:
-                    continue
-
                 pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+                if len(pcm) == 0:
+                    continue
                 if channels > 1:
                     pcm = pcm.reshape(-1, channels).mean(axis=1)
-                if rate != 16000 and len(pcm) > 0:
-                    target_len = int(len(pcm) * 16000 / rate)
-                    pcm = np.interp(
-                        np.linspace(0.0, 1.0, target_len, endpoint=False),
-                        np.linspace(0.0, 1.0, len(pcm), endpoint=False),
-                        pcm,
-                    ).astype(np.float32)
 
-                now = time.time()
-                for uid in active_ids:
-                    st = self.speaking_state.get(uid)
-                    if not st:
+                rms = float(np.sqrt(np.mean(np.square(pcm))))
+                # Ignore completely silent audio devices so idle monitors/cards use 0 CPU
+                if rms < 0.0012 and not vad_frames:
+                    continue
+
+                if rate != 16000:
+                    target_len = int(len(pcm) * 16000 / rate)
+                    if target_len > 0:
+                        pcm_16k = np.interp(
+                            np.linspace(0.0, 1.0, target_len, endpoint=False),
+                            np.linspace(0.0, 1.0, len(pcm), endpoint=False),
+                            pcm,
+                        ).astype(np.float32)
+                    else:
                         continue
-                    st["frames"].append(pcm)
-                    # Flush rolling 4.5s utterances even if user speaks non-stop
-                    total_samples = sum(len(f) for f in st["frames"])
-                    if total_samples >= 16000 * 4.5:
-                        utterance = np.concatenate(st["frames"], axis=0)
-                        st["frames"] = []
-                        st["started_at"] = now
-                        threading.Thread(
-                            target=self._process_utterance_numpy,
-                            args=(uid, utterance),
-                            daemon=True,
-                        ).start()
+                else:
+                    pcm_16k = pcm
+
+                # Mode 1: Explicit Discord SPEAKING events arrived recently
+                active_ids = [uid for uid, st in self.speaking_state.items() if st.get("active")]
+                if active_ids and rms >= 0.0012:
+                    for uid in active_ids:
+                        st = self.speaking_state.get(uid)
+                        if st is not None:
+                            st["frames"].append(pcm_16k)
+                            total_samples = sum(len(f) for f in st["frames"])
+                            if total_samples >= int(16000 * 4.0):
+                                utterance = np.concatenate(st["frames"], axis=0)
+                                st["frames"] = []
+                                threading.Thread(
+                                    target=self._process_utterance_numpy,
+                                    args=(uid, utterance),
+                                    daemon=True,
+                                ).start()
+                    continue
+
+                # Mode 2: Automatic Energy VAD fallback (works even if Discord hides SPEAKING events or user is in another tab)
+                if rms >= 0.0018:
+                    vad_frames.append(pcm_16k)
+                    silent_chunks = 0
+                    total_samples = sum(len(f) for f in vad_frames)
+                    if total_samples >= int(16000 * 4.0):
+                        utterance = np.concatenate(vad_frames, axis=0)
+                        vad_frames = []
+                        primary_uid = next(iter(self.tracked_users.keys()), None)
+                        if primary_uid:
+                            threading.Thread(
+                                target=self._process_utterance_numpy,
+                                args=(primary_uid, utterance),
+                                daemon=True,
+                            ).start()
+                elif vad_frames:
+                    silent_chunks += 1
+                    vad_frames.append(pcm_16k)
+                    # After ~0.6s of silence (6 x 100ms), flush the spoken phrase
+                    if silent_chunks >= 6:
+                        utterance = np.concatenate(vad_frames, axis=0)
+                        vad_frames = []
+                        silent_chunks = 0
+                        if len(utterance) >= int(16000 * 0.45):
+                            primary_uid = next(iter(self.tracked_users.keys()), None)
+                            if primary_uid:
+                                threading.Thread(
+                                    target=self._process_utterance_numpy,
+                                    args=(primary_uid, utterance),
+                                    daemon=True,
+                                ).start()
 
         except Exception as e:
-            print(f"[VoiceEngine] WASAPI loopback stopped: {e}")
+            print(f"[VoiceEngine] Loopback device '{dev_info.get('name')}' stopped: {e}")
         finally:
-            self._loopback_running = False
             try:
                 if stream:
                     stream.stop_stream()
