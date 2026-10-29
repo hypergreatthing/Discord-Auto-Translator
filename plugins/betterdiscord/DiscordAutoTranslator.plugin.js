@@ -2,14 +2,14 @@
  * @name DiscordAutoTranslator
  * @author Antigravity
  * @description Offline, gamer-friendly real-time auto-translator with complete sentence accuracy, inline translation under foreign messages, embed & image OCR translation, and auto-translating outgoing responses.
- * @version 0.2.0
+ * @version 0.3.0
  * @source https://github.com/hypergreatthing/Discord-Auto-Translator
  * @updateUrl https://raw.githubusercontent.com/hypergreatthing/Discord-Auto-Translator/main/plugins/betterdiscord/DiscordAutoTranslator.plugin.js
  */
 
 module.exports = class DiscordAutoTranslator {
     constructor() {
-        this.version = "0.2.0";
+        this.version = "0.3.0";
         this.updateUrl = "https://raw.githubusercontent.com/hypergreatthing/Discord-Auto-Translator/main/plugins/betterdiscord/DiscordAutoTranslator.plugin.js";
         this.defaultSettings = {
             targetLang: "en",
@@ -220,30 +220,51 @@ module.exports = class DiscordAutoTranslator {
 
             /* Image OCR Button & Box */
             .dat-ocr-btn {
+                position: absolute;
+                top: 8px;
+                right: 8px;
+                z-index: 100;
                 display: inline-flex;
                 align-items: center;
-                gap: 4px;
-                margin-top: 4px;
-                padding: 3px 8px;
-                background: #4f545c;
-                color: white;
-                font-size: 0.75em;
-                border: none;
-                border-radius: 3px;
+                gap: 5px;
+                padding: 5px 10px;
+                background: rgba(24, 25, 28, 0.88);
+                color: #ffffff;
+                font-size: 12px;
+                font-weight: 600;
+                border: 1px solid rgba(88, 101, 242, 0.7);
+                border-radius: 6px;
                 cursor: pointer;
-                transition: background 0.15s;
+                pointer-events: auto !important;
+                box-shadow: 0 3px 10px rgba(0, 0, 0, 0.55);
+                backdrop-filter: blur(4px);
+                transition: background 0.15s, transform 0.1s;
             }
             .dat-ocr-btn:hover {
                 background: #5865F2;
+                border-color: #ffffff;
+            }
+            .dat-ocr-btn.translated {
+                background: #248046;
+                border-color: rgba(255, 255, 255, 0.5);
             }
 
             .dat-ocr-result {
-                margin-top: 4px;
-                padding: 6px;
-                background: rgba(0, 0, 0, 0.4);
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+                margin-top: 6px;
+                margin-bottom: 4px;
+                padding: 8px 12px;
+                background: rgba(32, 34, 37, 0.9);
                 border-left: 3px solid #f1c40f;
-                border-radius: 3px;
-                font-size: 0.85em;
+                border-radius: 5px;
+                font-size: 0.9em;
+                color: #f6f6f7;
+                line-height: 1.4;
+                max-width: 550px;
+                white-space: pre-wrap;
+                word-break: break-word;
             }
 
             /* Outgoing translation chat toggle button & badge */
@@ -475,6 +496,7 @@ module.exports = class DiscordAutoTranslator {
        ========================================================== */
     initChannelScanner() {
         this.scanAllChannels();
+        this.scanVisibleImages();
         this.channelScanInterval = setInterval(() => {
             const curChannel = this.getCurrentChannelId();
             if (curChannel && curChannel !== this.lastChannelId) {
@@ -483,6 +505,7 @@ module.exports = class DiscordAutoTranslator {
                 this.scanAllChannels();
                 this.scanMemberGroups();
                 this.processHeaderTitle();
+                this.scanVisibleImages();
             }
         }, 1200);
     }
@@ -975,14 +998,21 @@ module.exports = class DiscordAutoTranslator {
     }
 
     processAllMessagesOnScreen() {
+        // Always attach on-demand "🌐 Translate Image" buttons to chat images
+        this.scanVisibleImages();
+
         if (!this.getServerRule(this.getCurrentServerKey()).enabled) return;
 
         const messages = document.querySelectorAll('[id^="message-content-"]:not([data-dat-processed])');
         messages.forEach((el) => {
             this.processMessageContent(el);
         });
+    }
 
-        const images = document.querySelectorAll('img[class*="imageContent_"]:not([data-dat-ocr-processed]), [class*="imageWrapper_"] img:not([data-dat-ocr-processed])');
+    scanVisibleImages(root = document) {
+        const images = root.querySelectorAll(
+            'img[class*="imageContent_"]:not([data-dat-ocr-processed]), [class*="imageWrapper_"] img:not([data-dat-ocr-processed])'
+        );
         images.forEach((img) => {
             this.processImageElement(img);
         });
@@ -990,6 +1020,15 @@ module.exports = class DiscordAutoTranslator {
 
     processMessageElement(element) {
         if (!element) return;
+
+        if (element.tagName === "IMG") {
+            this.processImageElement(element);
+            return;
+        }
+        if (typeof element.querySelectorAll === "function") {
+            this.scanVisibleImages(element);
+        }
+
         if (!this.getServerRule(this.getCurrentServerKey()).enabled) return;
 
         // Check if the node itself is message-content
@@ -1002,9 +1041,6 @@ module.exports = class DiscordAutoTranslator {
         if (typeof element.querySelectorAll === "function") {
             const messageContents = element.querySelectorAll('[id^="message-content-"]');
             messageContents.forEach((el) => this.processMessageContent(el));
-
-            const images = element.querySelectorAll('img[class*="imageContent_"], [class*="imageWrapper_"] img');
-            images.forEach((img) => this.processImageElement(img));
         }
     }
 
@@ -1314,45 +1350,150 @@ module.exports = class DiscordAutoTranslator {
        Image & Link OCR Processing
        ========================================================== */
     processImageElement(imgEl) {
-        if (imgEl.dataset.datOcrProcessed) return;
-        imgEl.dataset.datOcrProcessed = "true";
+        if (!imgEl || imgEl.dataset.datOcrProcessed) return;
 
-        const imgUrl = imgEl.src;
-        if (!imgUrl || imgUrl.startsWith("data:") && imgUrl.length < 50) return;
+        const imgUrl = imgEl.dataset.datOrigSrc || imgEl.src;
+        if (!imgUrl || (imgUrl.startsWith("data:") && imgUrl.length < 100)) return;
+
+        // Ignore small emojis, avatars, role icons, and stickers
+        if (imgEl.classList.contains("emoji") || /\/(emojis|avatars|icons|banners|clan-badges|stickers)\//i.test(imgUrl)) {
+            imgEl.dataset.datOcrProcessed = "true";
+            return;
+        }
+        const rect = imgEl.getBoundingClientRect ? imgEl.getBoundingClientRect() : null;
+        if (rect && rect.width > 0 && rect.height > 0 && (rect.width < 64 || rect.height < 36)) {
+            return;
+        }
 
         const parent = imgEl.closest('[class*="imageWrapper_"]') || imgEl.parentElement;
         if (!parent || parent.querySelector(".dat-ocr-btn")) return;
 
+        imgEl.dataset.datOcrProcessed = "true";
+        imgEl.dataset.datOrigSrc = imgUrl;
+        if (getComputedStyle(parent).position === "static") {
+            parent.style.position = "relative";
+        }
+
         const btn = document.createElement("button");
+        btn.type = "button";
         btn.className = "dat-ocr-btn";
         btn.innerText = "🌐 Translate Image";
 
-        btn.onclick = async (e) => {
-            e.stopPropagation();
-            btn.innerText = "⏳ Scanning...";
+        // Prevent Discord's image zoom lightbox / <a class="originalLink_"> from intercepting clicks on the button
+        const blockDiscordLightbox = (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            if (typeof ev.stopImmediatePropagation === "function") {
+                ev.stopImmediatePropagation();
+            }
+        };
+        ["mousedown", "mouseup", "pointerdown", "pointerup"].forEach((evtName) => {
+            btn.addEventListener(evtName, blockDiscordLightbox, true);
+        });
+
+        const applyImageSrc = (newSrc) => {
+            imgEl.removeAttribute("srcset");
+            if (imgEl.parentElement && imgEl.parentElement.tagName === "PICTURE") {
+                imgEl.parentElement.querySelectorAll("source").forEach((s) => s.removeAttribute("srcset"));
+            }
+            imgEl.src = newSrc;
+        };
+
+        btn.addEventListener("click", async (e) => {
+            blockDiscordLightbox(e);
+            if (btn.disabled) return;
+
+            // If already translated, toggle between Translated Image and Original Image
+            if (imgEl.dataset.datTranslatedSrc) {
+                const showingTranslated = imgEl.dataset.datShowingTranslated === "true";
+                if (showingTranslated) {
+                    applyImageSrc(imgEl.dataset.datOrigSrc);
+                    imgEl.dataset.datShowingTranslated = "false";
+                    btn.innerText = "🌐 Show Translated";
+                    btn.classList.remove("translated");
+                } else {
+                    applyImageSrc(imgEl.dataset.datTranslatedSrc);
+                    imgEl.dataset.datShowingTranslated = "true";
+                    btn.innerText = "🔄 Show Original";
+                    btn.classList.add("translated");
+                }
+                return;
+            }
+
+            if (!this.backendOnline) {
+                this.showToast("Translator backend is offline! Start the companion daemon first.", { type: "error" });
+                return;
+            }
+
+            btn.innerText = "⏳ Translating...";
             btn.disabled = true;
 
             try {
-                const res = await this.fetchImageOcr(imgUrl, this.settings.targetLang);
+                const serverRule = this.getServerRule(this.getCurrentServerKey());
+                const chanLang = this.channelLanguages.get(this.getCurrentChannelId());
+                const sourceHint = (serverRule && serverRule.sourceLang && serverRule.sourceLang !== "auto")
+                    ? serverRule.sourceLang
+                    : (chanLang || "auto");
+
+                const res = await this.fetchImageOcr(imgEl.dataset.datOrigSrc || imgUrl, this.settings.targetLang, sourceHint);
                 if (res && res.has_text && res.translated_text) {
-                    btn.innerText = "✓ Translated";
-                    let resBox = parent.querySelector(".dat-ocr-result");
+                    // 1. Replace image in-place with the rendered translated image overlay
+                    if (res.translated_image_data_url) {
+                        imgEl.dataset.datTranslatedSrc = res.translated_image_data_url;
+                        imgEl.dataset.datShowingTranslated = "true";
+                        applyImageSrc(res.translated_image_data_url);
+                        btn.innerText = "🔄 Show Original";
+                    } else {
+                        btn.innerText = "✓ Translated";
+                    }
+                    btn.classList.add("translated");
+                    btn.disabled = false;
+
+                    // 2. Also insert a copyable translated text card OUTSIDE the overflow:hidden imageWrapper_
+                    const outerAnchor = parent.closest('[class*="imageContent_"], [class*="embedWrapper_"], [class*="messageAttachment_"]') || parent;
+                    let resBox = outerAnchor.parentElement && outerAnchor.parentElement.querySelector(".dat-ocr-result");
                     if (!resBox) {
                         resBox = document.createElement("div");
                         resBox.className = "dat-ocr-result";
-                        parent.appendChild(resBox);
+                        outerAnchor.insertAdjacentElement("afterend", resBox);
                     }
-                    resBox.innerHTML = `<strong>🌐 OCR (${(res.source_lang || "").toUpperCase()}):</strong> ${res.translated_text}`;
+                    const srcCode = (res.source_lang || sourceHint || "auto").toUpperCase();
+                    const tgtCode = (res.target_lang || this.settings.targetLang).toUpperCase();
+
+                    resBox.innerHTML = "";
+                    const headerRow = document.createElement("div");
+                    headerRow.className = "dat-header";
+                    const badge = document.createElement("span");
+                    badge.className = "dat-badge";
+                    badge.innerText = `🖼️ Image OCR (${srcCode} → ${tgtCode})`;
+                    const copyBtn = document.createElement("button");
+                    copyBtn.className = "dat-copy-btn";
+                    copyBtn.innerText = "📋 Copy";
+                    copyBtn.onclick = (ev) => {
+                        ev.stopPropagation();
+                        navigator.clipboard.writeText(res.translated_text);
+                        copyBtn.innerText = "✓ Copied";
+                        setTimeout(() => { copyBtn.innerText = "📋 Copy"; }, 1500);
+                    };
+                    headerRow.appendChild(badge);
+                    headerRow.appendChild(copyBtn);
+
+                    const transBody = document.createElement("div");
+                    transBody.className = "dat-text";
+                    transBody.textContent = res.translated_text;
+
+                    resBox.appendChild(headerRow);
+                    resBox.appendChild(transBody);
                 } else {
-                    btn.innerText = "No Text Detected";
-                    setTimeout(() => { btn.innerText = "🌐 Translate Image"; btn.disabled = false; }, 2000);
+                    btn.innerText = "No Foreign Text Found";
+                    setTimeout(() => { btn.innerText = "🌐 Translate Image"; btn.disabled = false; }, 2200);
                 }
             } catch (err) {
                 btn.innerText = "OCR Failed";
                 console.error("[DiscordAutoTranslator] OCR Error:", err);
-                setTimeout(() => { btn.innerText = "🌐 Translate Image"; btn.disabled = false; }, 2000);
+                setTimeout(() => { btn.innerText = "🌐 Translate Image"; btn.disabled = false; }, 2200);
             }
-        };
+        }, true);
 
         parent.appendChild(btn);
 
@@ -1904,7 +2045,7 @@ module.exports = class DiscordAutoTranslator {
         return data;
     }
 
-    async fetchImageOcr(imageUrl, tgtLang = "en") {
+    async fetchImageOcr(imageUrl, tgtLang = "en", srcLang = "auto") {
         if (!this.backendOnline) return null;
 
         let resp;
@@ -1914,6 +2055,7 @@ module.exports = class DiscordAutoTranslator {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     image_url: imageUrl,
+                    source_lang: srcLang || "auto",
                     target_lang: tgtLang
                 })
             }, 60000);

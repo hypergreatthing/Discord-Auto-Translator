@@ -28,6 +28,7 @@ class TranslateRequest(BaseModel):
 
 class OCRTranslateRequest(BaseModel):
     image_url: str
+    source_lang: Optional[str] = "auto"
     target_lang: Optional[str] = "en"
 
 class ConfigUpdateRequest(BaseModel):
@@ -123,7 +124,8 @@ def ocr_translate(req: OCRTranslateRequest):
 
     result = ImageOCREngine.process_and_translate(
         image_source=req.image_url,
-        target_lang=target_lang
+        target_lang=target_lang,
+        source_lang=req.source_lang or "auto",
     )
     return result
 
