@@ -25,6 +25,7 @@ if %ERRORLEVEL% NEQ 0 (
         "%VENV_PY%" -m pip install --upgrade pip
         "%VENV_PY%" -m pip install fastapi uvicorn pydantic requests langdetect regex pillow psutil pystray ctranslate2 transformers huggingface_hub
         "%VENV_PY%" -m pip install -r "%~dp0requirements.txt"
+        "%VENV_PY%" -m pip install rapidocr-onnxruntime --no-deps --ignore-requires-python
     ) else (
         powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0installer\install.ps1" -Unattended
     )

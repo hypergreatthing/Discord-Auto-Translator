@@ -175,6 +175,8 @@ $reqFile = Join-Path $projectRoot "requirements.txt"
 if (Test-Path $reqFile) {
     Write-Host "  [*] Step 3b: Installing multilingual OCR & Real-Time Voice packages..." -ForegroundColor Cyan
     & $activePython @activeArgs -m pip install -r $reqFile
+    # Install rapidocr-onnxruntime pure-Python wheel even on Python 3.13/3.14 where its metadata caps <3.13
+    & $activePython @activeArgs -m pip install rapidocr-onnxruntime --no-deps --ignore-requires-python
 }
 
 # Verify core packages are importable
