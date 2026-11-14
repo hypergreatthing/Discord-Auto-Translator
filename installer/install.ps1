@@ -1,4 +1,4 @@
-# Discord Auto Translator - One-Click Setup Script
+﻿# Discord Auto Translator - One-Click Setup Script
 param(
     [switch]$Unattended = $false
 )
@@ -169,7 +169,7 @@ Write-Host "  [*] Upgrading pip..." -ForegroundColor Cyan
 & $activePython @activeArgs -m pip install --upgrade pip
 
 Write-Host "  [*] Step 3a: Installing core AI translation & server packages (FastAPI, Uvicorn, CTranslate2)..." -ForegroundColor Cyan
-& $activePython @activeArgs -m pip install fastapi uvicorn pydantic requests langdetect regex pillow psutil pystray ctranslate2 transformers huggingface_hub
+& $activePython @activeArgs -m pip install fastapi uvicorn pydantic requests langdetect regex pillow psutil pystray ctranslate2 sentencepiece transformers huggingface_hub
 
 $reqFile = Join-Path $projectRoot "requirements.txt"
 if (Test-Path $reqFile) {

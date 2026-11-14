@@ -23,7 +23,7 @@ if %ERRORLEVEL% NEQ 0 (
     echo [*] Installing missing Python packages into .venv...
     if exist "%VENV_PY%" (
         "%VENV_PY%" -m pip install --upgrade pip
-        "%VENV_PY%" -m pip install fastapi uvicorn pydantic requests langdetect regex pillow psutil pystray ctranslate2 transformers huggingface_hub
+        "%VENV_PY%" -m pip install fastapi uvicorn pydantic requests langdetect regex pillow psutil pystray ctranslate2 sentencepiece transformers huggingface_hub
         "%VENV_PY%" -m pip install -r "%~dp0requirements.txt"
         "%VENV_PY%" -m pip install rapidocr-onnxruntime --no-deps --ignore-requires-python
     ) else (

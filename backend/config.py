@@ -21,6 +21,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "default_reply_lang": "auto",      # Language to translate outgoing replies to ("auto" = last received foreign lang)
     "bilingual_reply": False,          # If True, sends both translated text and (original in parens)
     "ru_slang_normalize": True,        # Rewrite Russian slang/chat shorthand to plain Russian before translating
+    "ru_translation_engine": "opus_mt", # "opus_mt" (Dedicated Offline RU Specialist, default) or "google_gtx" (Free Google Translate + Offline Fallback)
 
     # Image & Link Settings
     "auto_ocr_images": False,          # False = On-demand (click to OCR, saves gaming CPU); True = Always auto-scan

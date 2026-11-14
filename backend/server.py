@@ -25,6 +25,7 @@ class TranslateRequest(BaseModel):
     source_lang: Optional[str] = "auto"
     target_lang: Optional[str] = "en"
     mode: Optional[str] = None
+    ru_engine: Optional[str] = None
 
 class OCRTranslateRequest(BaseModel):
     image_url: str
@@ -36,6 +37,7 @@ class ConfigUpdateRequest(BaseModel):
     process_priority: Optional[str] = None
     max_cpu_threads: Optional[int] = None
     accuracy_mode: Optional[str] = None
+    ru_translation_engine: Optional[str] = None
     beam_size: Optional[int] = None
     default_target_lang: Optional[str] = None
     default_reply_lang: Optional[str] = None
@@ -95,6 +97,9 @@ def update_config(req: ConfigUpdateRequest):
     if "max_cpu_threads" in req_dict:
         apply_thread_limits(cfg.get("max_cpu_threads", 2))
 
+    if "ru_translation_engine" in req_dict and req_dict["ru_translation_engine"]:
+        engine_instance.set_ru_engine(req_dict["ru_translation_engine"])
+
     return {"status": "updated", "config": cfg}
 
 @app.post("/translate")
@@ -110,7 +115,8 @@ def translate(req: TranslateRequest):
         text=req.text,
         source_lang=req.source_lang,
         target_lang=target_lang,
-        mode=mode
+        mode=mode,
+        ru_engine=req.ru_engine,
     )
     return result
 

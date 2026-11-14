@@ -1,19 +1,20 @@
 /**
  * @name DiscordAutoTranslator
  * @author Antigravity
- * @description Offline, gamer-friendly real-time auto-translator with complete sentence accuracy, inline translation under foreign messages, embed & image OCR translation, and auto-translating outgoing responses.
- * @version 0.3.0
+ * @description Offline, gamer-friendly real-time auto-translator with complete sentence accuracy, dedicated Russian Slang & Specialist Engine, inline translation under foreign messages, embed & image OCR translation, and auto-translating outgoing responses.
+ * @version 0.4.0
  * @source https://github.com/hypergreatthing/Discord-Auto-Translator
  * @updateUrl https://raw.githubusercontent.com/hypergreatthing/Discord-Auto-Translator/main/plugins/betterdiscord/DiscordAutoTranslator.plugin.js
  */
 
 module.exports = class DiscordAutoTranslator {
     constructor() {
-        this.version = "0.3.0";
+        this.version = "0.4.0";
         this.updateUrl = "https://raw.githubusercontent.com/hypergreatthing/Discord-Auto-Translator/main/plugins/betterdiscord/DiscordAutoTranslator.plugin.js";
         this.defaultSettings = {
             targetLang: "en",
             accuracyMode: "deep_thought", // "deep_thought" (complete sentence context) or "fast"
+            ruTranslationEngine: "opus_mt", // "opus_mt" (Option 1 Default: Offline Specialist + Slang) or "google_gtx" (Option 2: Free Google GTX + Slang + Offline Fallback)
             translateOutgoing: false,     // Global auto-translate outgoing toggle
             defaultOutgoingLang: "auto",  // "auto" or specific language code (ja, es, etc.)
             channelOverrides: {},         // Per-channel manual target language overrides { channelId: "ja" }
@@ -1284,7 +1285,13 @@ module.exports = class DiscordAutoTranslator {
 
         const modeBadge = document.createElement("span");
         modeBadge.style.opacity = "0.7";
-        modeBadge.innerText = result.accuracy_mode === "deep_thought" ? "• Deep Thought" : "• Fast";
+        if (result.accuracy_mode === "opus_mt") {
+            modeBadge.innerText = "• 🇷🇺 RU Specialist (Offline)";
+        } else if (result.accuracy_mode === "google_gtx") {
+            modeBadge.innerText = "• 🇷🇺 Google Translate + Slang";
+        } else {
+            modeBadge.innerText = result.accuracy_mode === "deep_thought" ? "• Deep Thought" : "• Fast";
+        }
 
         const copyBtn = document.createElement("button");
         copyBtn.className = "dat-copy-btn";
@@ -1742,6 +1749,35 @@ module.exports = class DiscordAutoTranslator {
             fromRow.appendChild(fromLabel);
             fromRow.appendChild(fromSelect);
             popup.appendChild(fromRow);
+
+            // Quick Russian Engine Selector in popup
+            const ruRow = document.createElement("div");
+            ruRow.className = "dat-lang-item";
+            ruRow.style.cursor = "default";
+            const ruLabel = document.createElement("span");
+            ruLabel.innerText = "🇷🇺 RU Engine:";
+            const ruSelect = document.createElement("select");
+            ruSelect.style.cssText = "background:#2f3136;color:white;border:1px solid #202225;border-radius:4px;padding:2px;max-width:62%;";
+            const ruOpts = [
+                { code: "opus_mt", name: "1. Offline Specialist (Default)" },
+                { code: "google_gtx", name: "2. Google GTX (Free)" }
+            ];
+            ruOpts.forEach((ro) => {
+                const opt = document.createElement("option");
+                opt.value = ro.code;
+                opt.textContent = ro.name;
+                if ((this.settings.ruTranslationEngine || "opus_mt") === ro.code) opt.selected = true;
+                ruSelect.appendChild(opt);
+            });
+            ruSelect.onclick = (e) => e.stopPropagation();
+            ruSelect.onchange = (e) => {
+                e.stopPropagation();
+                this.setRuTranslationEngine(ruSelect.value);
+                this.showToast(`Russian Engine: ${ruSelect.value === "google_gtx" ? "Option 2 (Google GTX + Slang)" : "Option 1 (Offline Specialist + Slang)"}`, { type: "info" });
+            };
+            ruRow.appendChild(ruLabel);
+            ruRow.appendChild(ruSelect);
+            popup.appendChild(ruRow);
         }
 
         // ---- Per-server outgoing translation toggle ----
@@ -2013,8 +2049,24 @@ module.exports = class DiscordAutoTranslator {
         }
     }
 
+    setRuTranslationEngine(engineMode) {
+        const mode = engineMode === "google_gtx" ? "google_gtx" : "opus_mt";
+        this.settings.ruTranslationEngine = mode;
+        this.saveSettings();
+        this.translationCache.clear();
+        if (this.backendOnline) {
+            this.fetchWithTimeout("/config", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ru_translation_engine: mode })
+            }, 5000).catch(() => {});
+        }
+        this.refreshMessageTranslations();
+    }
+
     async fetchTranslation(text, srcLang = "auto", tgtLang = "en") {
-        const cacheKey = `${srcLang}:${tgtLang}:${text}`;
+        const ruEng = this.settings.ruTranslationEngine || "opus_mt";
+        const cacheKey = `${srcLang}:${tgtLang}:${ruEng}:${text}`;
         if (this.translationCache.has(cacheKey)) {
             return this.translationCache.get(cacheKey);
         }
@@ -2031,7 +2083,8 @@ module.exports = class DiscordAutoTranslator {
                     text: text,
                     source_lang: srcLang,
                     target_lang: tgtLang,
-                    mode: this.settings.accuracyMode
+                    mode: this.settings.accuracyMode,
+                    ru_engine: ruEng
                 })
             }, 30000);
         } catch (e) {
@@ -2106,6 +2159,17 @@ module.exports = class DiscordAutoTranslator {
                     <option value="fast" ${this.settings.accuracyMode === "fast" ? "selected" : ""}>Fast Mode (Greedy Search / Low Latency)</option>
                 </select>
                 <small style="color: #8e9297; display: block; margin-top: 4px;">Ensures full thought correctness instead of naive single-word translation.</small>
+            </div>
+
+            <div style="margin-bottom: 16px; padding: 10px 12px; background: rgba(88, 101, 242, 0.1); border-left: 3px solid #5865F2; border-radius: 4px;">
+                <label style="display: block; font-weight: 600; margin-bottom: 6px; color: #ffffff;">🇷🇺 Russian Translation Engine (RU ↔ EN Only):</label>
+                <select id="dat-ru-engine" style="background: #2f3136; color: white; border: 1px solid #202225; padding: 6px; border-radius: 4px; width: 100%;">
+                    <option value="opus_mt" ${(this.settings.ruTranslationEngine || "opus_mt") === "opus_mt" ? "selected" : ""}>Option 1 (Default): Dedicated Offline Russian Specialist (OPUS-MT + Russian Slang &amp; Euphemisms)</option>
+                    <option value="google_gtx" ${this.settings.ruTranslationEngine === "google_gtx" ? "selected" : ""}>Option 2: Free Google Translate (GTX + Russian Slang &amp; Euphemisms + Offline Fallback)</option>
+                </select>
+                <small style="color: #b9bbbe; display: block; margin-top: 5px; line-height: 1.35;">
+                    Both options include the built-in <b>Russian Slang, Modern Euphemisms &amp; Gaming Idioms Pre-Processor</b> (handles Runet idioms like <i>не вешай лапшу</i>, <i>мне фиолетово</i>, <i>переобулся</i>, <i>не вывозит</i>, <i>душнила</i>, <i>инфа сотка</i>, softened profanity &amp; mat). Option 1 runs 100% offline; Option 2 queries Google's free GTX endpoint and falls back to Option 1 if offline.
+                </small>
             </div>
 
             <div style="margin-bottom: 16px;">
@@ -2210,6 +2274,9 @@ module.exports = class DiscordAutoTranslator {
         panel.querySelector("#dat-accuracy-mode").onchange = (e) => {
             this.settings.accuracyMode = e.target.value;
             this.saveSettings();
+        };
+        panel.querySelector("#dat-ru-engine").onchange = (e) => {
+            this.setRuTranslationEngine(e.target.value);
         };
         panel.querySelector("#dat-default-outgoing-lang").onchange = (e) => {
             this.settings.defaultOutgoingLang = e.target.value;
