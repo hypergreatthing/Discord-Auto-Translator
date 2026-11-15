@@ -196,12 +196,20 @@ class TranslationEngine:
                         self.model_path,
                         src_lang="eng_Latn",
                         local_files_only=True,
+                        fix_mistral_regex=True,
+                    )
+                except TypeError:
+                    self.tokenizer = AutoTokenizer.from_pretrained(
+                        self.model_path,
+                        src_lang="eng_Latn",
+                        local_files_only=True,
                     )
                 except Exception:
                     try:
                         self.tokenizer = NllbTokenizerFast.from_pretrained(
                             "facebook/nllb-200-distilled-600M",
                             local_files_only=True,
+                            fix_mistral_regex=True,
                         )
                     except Exception:
                         self.tokenizer = NllbTokenizerFast.from_pretrained(

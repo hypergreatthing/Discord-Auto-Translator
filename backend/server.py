@@ -137,27 +137,63 @@ def ocr_translate(req: OCRTranslateRequest):
 
 @app.post("/update")
 def pull_latest_from_github():
-    """Pulls the latest code from GitHub for the local repo if it's a git checkout."""
+    """Pulls the latest code from GitHub (supports both git clones and Release ZIP installs)."""
     import os
     import subprocess
+    import urllib.request
     repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if not os.path.exists(os.path.join(repo_dir, ".git")):
-        return {"updated": False, "reason": "Not a git repository"}
+    if os.path.exists(os.path.join(repo_dir, ".git")):
+        try:
+            proc = subprocess.run(
+                ["git", "pull", "--ff-only", "origin", "main"],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=20
+            )
+            return {
+                "updated": proc.returncode == 0,
+                "mode": "git",
+                "stdout": (proc.stdout or "").strip(),
+                "stderr": (proc.stderr or "").strip(),
+            }
+        except Exception as e:
+            return {"updated": False, "error": str(e)}
+
+    # Fallback for Release ZIP installations (no .git directory): download latest backend files from main
+    raw_base = "https://raw.githubusercontent.com/hypergreatthing/Discord-Auto-Translator/main"
+    files_to_sync = [
+        "backend/config.py",
+        "backend/engine.py",
+        "backend/main.py",
+        "backend/masker.py",
+        "backend/ocr.py",
+        "backend/priority.py",
+        "backend/ru_slang.py",
+        "backend/segmenter.py",
+        "backend/server.py",
+        "backend/tray.py",
+        "backend/voice_engine.py",
+        "requirements.txt",
+        "start_translator.bat",
+        "start_silent.vbs",
+        "installer/install.ps1",
+    ]
+    updated_files = []
     try:
-        proc = subprocess.run(
-            ["git", "pull", "--ff-only", "origin", "main"],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            timeout=20
-        )
-        return {
-            "updated": proc.returncode == 0,
-            "stdout": (proc.stdout or "").strip(),
-            "stderr": (proc.stderr or "").strip(),
-        }
+        for rel_path in files_to_sync:
+            url = f"{raw_base}/{rel_path}"
+            req = urllib.request.Request(url, headers={"User-Agent": "DiscordAutoTranslator-Updater/1.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status == 200:
+                    dest_path = os.path.join(repo_dir, *rel_path.split("/"))
+                    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                    with open(dest_path, "wb") as f:
+                        f.write(resp.read())
+                    updated_files.append(rel_path)
+        return {"updated": len(updated_files) > 0, "mode": "http_sync", "files": updated_files}
     except Exception as e:
-        return {"updated": False, "error": str(e)}
+        return {"updated": False, "mode": "http_sync", "error": str(e)}
 
 
 # ==========================================================
